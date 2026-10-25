@@ -47,7 +47,7 @@ Create a source ZIP without repository history, local configuration, generated
 files, or build output:
 
 ```sh
-python3 scripts/package.py --output dist/TestingFloor-0.1.0.zip
+python3 scripts/package.py --output dist/TestingFloor-0.2.0.zip
 ```
 
 The archive contains a `TestingFloor/` directory ready to copy into a project's
@@ -59,3 +59,5 @@ For a platform-specific binary package, use your installed engine's `RunUAT`
 `-Package` directory outside the source tree, and explicit `-TargetPlatforms`.
 Review the resulting archive before uploading it. Never publish a host game's
 configuration, content, binaries, or repository history with the SDK.
+
+Keep [SDK_CONTRACT.md](SDK_CONTRACT.md) identical to the Unity SDK copy. Update both implementations and observable regression tests when changing shared behavior. Follow Epic's [plugin module guidance](https://dev.epicgames.com/documentation/en-us/unreal-engine/plugins-in-unreal-engine).

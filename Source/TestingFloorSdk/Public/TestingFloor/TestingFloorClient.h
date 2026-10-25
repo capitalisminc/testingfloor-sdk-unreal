@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/Ticker.h"
 #include "Dom/JsonValue.h"
 
 namespace TestingFloor
@@ -19,6 +20,8 @@ public:
 	FProperties& Set(const FString& Key, const FGuid& Value);
 	FProperties& Set(const FString& Key, const TArray<FString>& Values);
 	FProperties& Set(const FString& Key, const TArray<int32>& Values);
+	/** Unsupported custom values must be converted explicitly at the call site. */
+	template <typename T> FProperties& Set(const FString& Key, T Value) = delete;
 	FProperties& SetIfPresent(const FString& Key, const FString& Value);
 	FProperties& SetVector(const FString& Prefix, const FVector& Position);
 	void Merge(const FProperties& Overrides);
@@ -32,10 +35,11 @@ private:
 
 struct TESTINGFLOORSDK_API FRecordingContext
 {
-	FString SessionID;
 	FString RecordingUUID;
 	TOptional<int64> PlaytestID;
 	bool bSuppressQR = true;
+	/** Read the current launch argument or Saved/TestingFloor/recording-payload.json. */
+	static TOptional<FRecordingContext> Discover();
 	static TOptional<FRecordingContext> Parse(const FString& Json, FDateTime Now);
 	/** Handles raw argv flattened by Unreal, shell quoting and Windows escaped JSON. */
 	static TOptional<FRecordingContext> FromCommandLine(const FString& CommandLine, FDateTime Now);
@@ -141,6 +145,12 @@ public:
 	using FActivitySource = TFunction<FActivitySample()>;
 	using FClock = TFunction<FDateTime()>;
 
+	/** Create an automatically ticked client using the engine environment and HTTP transport. */
+	static TSharedRef<FClient> Create(FSettings Settings);
+	~FClient();
+	FClient(const FClient&) = delete;
+	FClient& operator=(const FClient&) = delete;
+	/** Advanced creation seam for custom transports and deterministic clocks. */
 	static TSharedRef<FClient> Create(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock = [] { return FDateTime::UtcNow(); });
 	void SetContextProvider(FContextProvider Provider);
 	void SetActivitySource(FActivitySource Source);
@@ -149,8 +159,8 @@ public:
 	void SetMovementSettings(const FMovementSettings& Settings);
 	void SetMovementTrackingEnabled(bool bEnabled);
 	bool Track(const FString& Name, const FProperties& Properties = {});
-	void StartSession();
-	void EndSession();
+	/** Tick with monotonic real time, including during gameplay pause. */
+	void Tick();
 	void Tick(double NowSeconds);
 	void Flush();
 	/** Bounded shutdown drain. A deadline never stalls game exit indefinitely. */
@@ -161,7 +171,7 @@ public:
 	void RecordTeleport(const FVector& StartCentimeters, const FVector& EndCentimeters, const FString& Reason, double DurationSeconds = 0.0);
 	void ResetMovement();
 	EState GetState() const;
-	const FString& GetSessionID() const;
+	const FString& GetPlaySessionID() const;
 	const FString& GetDeviceID() const;
 	const FString& GetUserID() const;
 	const TOptional<FRecordingContext>& GetRecordingContext() const;
@@ -176,6 +186,7 @@ private:
 	void EmitMovement(const TCHAR* Reason, double Distance, double Duration, double Rotation, double FOV, double CameraDistance);
 	void FillActivityContext(FProperties& Properties, const FActivitySample& Sample) const;
 
+	FTSTicker::FDelegateHandle TickerHandle;
 	FSettings Settings;
 	TSharedRef<ITransport> Transport;
 	FClock Clock;
@@ -193,8 +204,7 @@ private:
 	double RetryDelaySeconds = 1.0;
 	int32 DroppedEvents = 0;
 	bool bRequestInFlight = false;
-	bool bSessionStarted = false;
-	bool bSessionEnded = false;
+	bool bShutdown = false;
 	bool bFlushRequested = false;
 
 	TOptional<FActivitySample> LastSample;

@@ -55,7 +55,6 @@ bool FTestingFloorRecordingCommandLineTest::RunTest(const FString& Parameters)
 		const auto Recording = TestingFloor::FRecordingContext::FromCommandLine(CommandLine, Now);
 		TF_REQUIRE_TRUE(Recording.IsSet(), "Recorder JSON survives supported command-line quoting");
 		TestEqual(TEXT("Full recording identity includes spaces"), Recording->RecordingUUID, FString(TEXT("recording with spaces")));
-		TestEqual(TEXT("Recorder session stays separate"), Recording->SessionID, FString(TEXT("recorder")));
 		TestFalse(TEXT("Explicit QR visibility survives quoting"), Recording->bSuppressQR);
 	}
 	const auto Escaped = TestingFloor::FRecordingContext::FromCommandLine(TEXT(R"TF(--testing-floor={"recording_uuid":"recording } \"quoted\" \\ path","metadata":{"nested":true}} -log)TF"), Now);
@@ -91,9 +90,9 @@ bool FTestingFloorRecordingResolutionTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Playtest numeric metadata retained"), Recording->PlaytestID.IsSet() && Recording->PlaytestID.GetValue() == 42);
 		TestTrue(TEXT("Recorder handoff suppresses QR unless explicitly overridden"), Recording->bSuppressQR);
 	}
-	const auto Preferred = TestingFloor::FRecordingContext::Resolve(TEXT(R"TF(--testing-floor={"session_id":"cli-recorder"})TF"), Sidecars, Now);
+	const auto Preferred = TestingFloor::FRecordingContext::Resolve(TEXT(R"TF(--testing-floor={"recording_uuid":"cli-recording"})TF"), Sidecars, Now);
 	TF_REQUIRE_TRUE(Preferred.IsSet(), "Valid command line takes priority");
-	TestEqual(TEXT("Session-only handoff supplies recording identity"), Preferred->RecordingUUID, FString(TEXT("cli-recorder")));
+	TestEqual(TEXT("Canonical handoff supplies recording identity"), Preferred->RecordingUUID, FString(TEXT("cli-recording")));
 	TestFalse(TEXT("All invalid candidates leave recording unassociated"), TestingFloor::FRecordingContext::Resolve(TEXT("--testing-floor={}"), TArray<FString>{ Stale, TEXT("{}") }, Now).IsSet());
 	return true;
 }
@@ -109,8 +108,8 @@ bool FTestingFloorRecordingMetadataTest::RunTest(const FString& Parameters)
 	TF_REQUIRE_TRUE(Settings.Recording.IsSet(), "Recording context exists");
 	const auto Client = TestingFloor::FClient::Create(Settings, {}, MakeShared<TestingFloorRecordingTests::FTransport>());
 	const auto Restarted = TestingFloor::FClient::Create(Settings, {}, MakeShared<TestingFloorRecordingTests::FTransport>());
-	TestNotEqual(TEXT("Each play boot has a fresh analytics session within one recording"), Client->GetSessionID(), Restarted->GetSessionID());
-	TestNotEqual(TEXT("Analytics play session differs from recorder session"), Client->GetSessionID(), Settings.Recording->SessionID);
+	TestNotEqual(TEXT("Each play boot has a fresh analytics session within one recording"), Client->GetPlaySessionID(), Restarted->GetPlaySessionID());
+	TestNotEqual(TEXT("Analytics play session differs from recording identity"), Client->GetPlaySessionID(), Settings.Recording->RecordingUUID);
 	TestingFloor::FActivitySample Sample;
 	Sample.CameraRotation = FRotator(30.0, 90.0, 10.0).Quaternion();
 	Sample.CameraFOV = 90.0;
@@ -132,8 +131,8 @@ bool FTestingFloorRecordingMetadataTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Screen width captured with event"), (*FirstMetadata)->GetIntegerField(TEXT("screen_width")), 1920);
 	TestEqual(TEXT("Screen height captured with event"), (*FirstMetadata)->GetIntegerField(TEXT("screen_height")), 1080);
 	TestEqual(TEXT("Recording groups multiple play sessions"), (*FirstMetadata)->GetStringField(TEXT("recording_uuid")), Settings.Recording->RecordingUUID);
-	TestEqual(TEXT("Recorder session preserved separately"), (*FirstMetadata)->GetStringField(TEXT("session_id")), Settings.Recording->SessionID);
-	TestEqual(TEXT("Collector top-level session remains the play session"), First->GetStringField(TEXT("$session_id")), Client->GetSessionID());
+	TestFalse(TEXT("Retired recorder session field is not emitted"), (*FirstMetadata)->HasField(TEXT("session_id")));
+	TestEqual(TEXT("Collector top-level session remains the play session"), First->GetStringField(TEXT("$session_id")), Client->GetPlaySessionID());
 	TestEqual(TEXT("Host Euler conversion overrides Unreal Euler convention"), First->GetNumberField(TEXT("camera.euler.x")), 12.0);
 	TestEqual(TEXT("Host Euler conversion snapshots Y"), First->GetNumberField(TEXT("camera.euler.y")), 34.0);
 	TestEqual(TEXT("Host Euler conversion snapshots Z"), First->GetNumberField(TEXT("camera.euler.z")), 56.0);

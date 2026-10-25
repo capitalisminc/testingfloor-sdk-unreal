@@ -21,3 +21,4 @@ Source/TestingFloorSdkTests/Private/TestingFloorTestHelpers.h
 Source/TestingFloorSdkTests/TestingFloorSdkTests.Build.cs
 CONTRIBUTING.md
 AGENTS.md
+SDK_CONTRACT.md

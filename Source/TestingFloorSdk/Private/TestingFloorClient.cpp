@@ -3,6 +3,13 @@
 #include "Dom/JsonObject.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/PlatformProperties.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Culture.h"
+#include "Misc/CommandLine.h"
+#include "Misc/EngineVersion.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -152,7 +159,7 @@ FProperties& FProperties::Set(const FString& Key, const FString& Value)
 
 FProperties& FProperties::Set(const FString& Key, const TCHAR* Value)
 {
-	return Set(Key, FString(Value ? Value : TEXT("")));
+	return Value ? Set(Key, FString(Value)) : *this;
 }
 
 FProperties& FProperties::Set(const FString& Key, int32 Value)
@@ -245,6 +252,17 @@ const TMap<FString, TSharedPtr<FJsonValue>>& FProperties::GetValues() const
 	return Properties;
 }
 
+TOptional<FRecordingContext> FRecordingContext::Discover()
+{
+	FString Sidecar;
+	TArray<FString> Payloads;
+	if (FFileHelper::LoadFileToString(Sidecar, *(FPaths::ProjectSavedDir() / TEXT("TestingFloor/recording-payload.json"))))
+	{
+		Payloads.Add(MoveTemp(Sidecar));
+	}
+	return Resolve(FCommandLine::Get(), Payloads, FDateTime::UtcNow());
+}
+
 TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDateTime Now)
 {
 	TSharedPtr<FJsonObject> Object;
@@ -253,15 +271,9 @@ TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDate
 		return {};
 	}
 	FRecordingContext Result;
-	Object->TryGetStringField(TEXT("session_id"), Result.SessionID);
 	Object->TryGetStringField(TEXT("recording_uuid"), Result.RecordingUUID);
-	Result.SessionID.TrimStartAndEndInline();
 	Result.RecordingUUID.TrimStartAndEndInline();
 	if (Result.RecordingUUID.IsEmpty())
-	{
-		Result.RecordingUUID = Result.SessionID;
-	}
-	if (Result.RecordingUUID.IsEmpty() && Result.SessionID.IsEmpty())
 	{
 		return {};
 	}
@@ -386,7 +398,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 		Object->SetStringField(TEXT("$user_id"), Settings.UserID);
 	}
 	const TSharedRef<FJsonObject> Platform = MakeShared<FJsonObject>();
-	Platform->SetStringField(TEXT("sdk_version"), TEXT("unreal-0.1.0"));
+	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.2.0"));
 	Platform->SetStringField(TEXT("engine"), TEXT("Unreal ") + Settings.EngineVersion);
 	Platform->SetStringField(TEXT("app_version"), Settings.AppVersion);
 	Platform->SetStringField(TEXT("os"), Settings.OperatingSystem);
@@ -407,10 +419,6 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 	if (Settings.Recording.IsSet())
 	{
 		const FRecordingContext& Recording = Settings.Recording.GetValue();
-		if (!Recording.SessionID.IsEmpty())
-		{
-			Platform->SetStringField(TEXT("session_id"), Recording.SessionID);
-		}
 		Platform->SetStringField(TEXT("recording_uuid"), Recording.RecordingUUID);
 		if (Recording.PlaytestID.IsSet())
 		{
@@ -434,7 +442,7 @@ FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FD
 	OutConsumed = 0;
 	for (const FEvent& Event : Events)
 	{
-		if (Written >= FMath::Clamp(Settings.BatchMaxEvents, 1, 1000))
+		if (Written >= FMath::Clamp(Settings.BatchMaxEvents, 1, 2000))
 		{
 			break;
 		}
@@ -463,6 +471,33 @@ FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FD
 bool FActivitySample::IsEmpty() const
 {
 	return !PlayerPosition.IsSet() && !CameraPosition.IsSet() && !CameraRotation.IsSet() && !CameraFOV.IsSet();
+}
+
+TSharedRef<FClient> FClient::Create(FSettings Settings)
+{
+	if (!Settings.Recording.IsSet()) Settings.Recording = FRecordingContext::Discover();
+	if (Settings.EngineVersion.IsEmpty()) Settings.EngineVersion = FEngineVersion::Current().ToString();
+	if (Settings.OperatingSystem.IsEmpty()) Settings.OperatingSystem = FPlatformProperties::PlatformName();
+	if (Settings.Locale.IsEmpty()) Settings.Locale = FInternationalization::Get().GetCurrentCulture()->GetName();
+	const auto Client = Create(MoveTemp(Settings), {GIsEditor, GIsAutomationTesting}, MakeHttpTransport());
+	if (Client->GetState() == EState::Ok)
+	{
+		const TWeakPtr<FClient> WeakClient = Client;
+		Client->TickerHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([WeakClient](float) {
+			if (const auto Active = WeakClient.Pin())
+			{
+				Active->Tick();
+				return true;
+			}
+			return false;
+		}));
+	}
+	return Client;
+}
+
+FClient::~FClient()
+{
+	FTSTicker::RemoveTicker(TickerHandle);
 }
 
 TSharedRef<FClient> FClient::Create(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock)
@@ -558,7 +593,7 @@ void FClient::FillActivityContext(FProperties& Properties, const FActivitySample
 bool FClient::Track(const FString& Name, const FProperties& Properties)
 {
 	check(IsInGameThread());
-	if ((State != EState::Ok && State != EState::NetworkDown) || Name.TrimStartAndEnd().IsEmpty() || bSessionEnded)
+	if ((State != EState::Ok && State != EState::NetworkDown) || Name.TrimStartAndEnd().IsEmpty() || bShutdown)
 	{
 		return false;
 	}
@@ -592,30 +627,16 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 	return true;
 }
 
-void FClient::StartSession()
+void FClient::Tick()
 {
-	if (!bSessionStarted)
-	{
-		bSessionStarted = true;
-		Track(TEXT("session_start"));
-	}
-}
-
-void FClient::EndSession()
-{
-	if (!bSessionEnded)
-	{
-		Track(TEXT("session_end"));
-		bSessionEnded = true;
-		Flush();
-	}
+	Tick(FPlatformTime::Seconds());
 }
 
 void FClient::Tick(double NowSeconds)
 {
 	check(IsInGameThread());
 	CurrentSeconds = NowSeconds;
-	if (Settings.bMovementTracking && !bSessionEnded && ActivitySource && (State == EState::Ok || State == EState::NetworkDown))
+	if (Settings.bMovementTracking && !bShutdown && ActivitySource && (State == EState::Ok || State == EState::NetworkDown))
 	{
 		if (Teleports.IsEmpty())
 		{
@@ -693,6 +714,9 @@ void FClient::CompleteSend(int32 ResponseCode, bool bSucceeded)
 	}
 	else if (ResponseCode >= 400 && ResponseCode < 500 && ResponseCode != 408 && ResponseCode != 429)
 	{
+		State = EState::Ok;
+		RetryDelaySeconds = 1.0;
+		NextRetrySeconds = 0.0;
 		DroppedEvents += InFlight.Num();
 		InFlight.Reset();
 		bFlushRequested = !Queue.IsEmpty();
@@ -709,7 +733,10 @@ void FClient::CompleteSend(int32 ResponseCode, bool bSucceeded)
 
 void FClient::Shutdown(double TimeoutSeconds)
 {
-	EndSession();
+	FTSTicker::RemoveTicker(TickerHandle);
+	TickerHandle.Reset();
+	bShutdown = true;
+	Flush();
 	const double Deadline = FPlatformTime::Seconds() + FMath::Clamp(TimeoutSeconds, 0.0, 5.0);
 	double Previous = FPlatformTime::Seconds();
 	while (GetPendingEventCount() > 0 && FPlatformTime::Seconds() < Deadline)
@@ -844,7 +871,7 @@ void FClient::CancelTeleport(uint64 Token)
 
 void FClient::RecordTeleport(const FVector& StartCentimeters, const FVector& EndCentimeters, const FString& Reason, double DurationSeconds)
 {
-	Track(TEXT("player_teleported"), FProperties().SetIfPresent(TEXT("teleport.reason"), Reason).SetVector(TEXT("teleport.start.position"), StartCentimeters).SetVector(TEXT("teleport.end.position"), EndCentimeters).Set(TEXT("teleport.duration"), FMath::Max(0.0, DurationSeconds)).Set(TEXT("teleport.distance"), FVector::Distance(StartCentimeters, EndCentimeters) / 100.0));
+	Track(TEXT("player_teleported"), FProperties().Set(TEXT("teleport.kind"), TEXT("teleport")).SetIfPresent(TEXT("teleport.reason"), Reason).SetVector(TEXT("teleport.start.position"), StartCentimeters).SetVector(TEXT("teleport.end.position"), EndCentimeters).Set(TEXT("teleport.duration"), FMath::Max(0.0, DurationSeconds)).Set(TEXT("teleport.distance"), FVector::Distance(StartCentimeters, EndCentimeters) / 100.0));
 	ResetMovement();
 }
 
@@ -852,7 +879,7 @@ EState FClient::GetState() const
 {
 	return State;
 }
-const FString& FClient::GetSessionID() const
+const FString& FClient::GetPlaySessionID() const
 {
 	return SessionID;
 }

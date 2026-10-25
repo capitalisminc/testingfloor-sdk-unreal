@@ -37,7 +37,7 @@ def release_files(root=ROOT):
         if any(part.startswith(".") for part in path.parts):
             raise ValueError(f"Hidden files cannot be distributed: {entry}")
         if path.parts[0] != "Source" and entry not in {
-            "TestingFloor.uplugin", "README.md", "LICENSE.md", "CHANGELOG.md", "ThirdPartyNotices.md", "CONTRIBUTING.md", "AGENTS.md"
+            "TestingFloor.uplugin", "README.md", "LICENSE.md", "CHANGELOG.md", "ThirdPartyNotices.md", "CONTRIBUTING.md", "AGENTS.md", "SDK_CONTRACT.md"
         }:
             raise ValueError(f"Unexpected release file: {entry}")
         if path.parts[0] == "Source" and path.suffix not in {".cpp", ".h", ".c", ".cs", ".md"}:
@@ -54,7 +54,7 @@ def release_files(root=ROOT):
 
 def validate(root=ROOT):
     files = release_files(root)
-    required = {"TestingFloor.uplugin", "README.md", "LICENSE.md", "CHANGELOG.md", "ThirdPartyNotices.md", "CONTRIBUTING.md", "AGENTS.md"}
+    required = {"TestingFloor.uplugin", "README.md", "LICENSE.md", "CHANGELOG.md", "ThirdPartyNotices.md", "CONTRIBUTING.md", "AGENTS.md", "SDK_CONTRACT.md"}
     included = {file.relative_to(root).as_posix() for file in files}
     if not required.issubset(included):
         raise ValueError("Release manifest omits required metadata or licenses")
@@ -66,7 +66,7 @@ def validate(root=ROOT):
     modules = descriptor["Modules"]
     if len(modules) != len(expected_modules) or {m["Name"]: m["Type"] for m in modules} != expected_modules:
         raise ValueError("Unexpected plugin module or module type")
-    if descriptor["VersionName"] != "0.1.0" or descriptor["CreatedBy"] != "Testing Floor":
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", descriptor["VersionName"]) or descriptor["CreatedBy"] != "Testing Floor":
         raise ValueError("Check the plugin's public version and publisher metadata")
     if descriptor["CanContainContent"]:
         raise ValueError("This SDK release must be content-free")

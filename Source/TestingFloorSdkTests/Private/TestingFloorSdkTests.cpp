@@ -12,6 +12,13 @@
 
 namespace TestingFloorClientTests
 {
+enum class ECustomProperty { Example };
+template <typename T> concept CPropertyValue = requires(TestingFloor::FProperties& Properties, T Value) {
+	Properties.Set(TEXT("value"), Value);
+};
+static_assert(CPropertyValue<FString> && CPropertyValue<int64> && CPropertyValue<const TCHAR*>);
+static_assert(!CPropertyValue<ECustomProperty> && !CPropertyValue<TArray<double>>);
+
 class FTransport final : public TestingFloor::ITransport
 {
 public:
@@ -85,11 +92,13 @@ bool FTestingFloorGateTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Explicit editor opt-in collects"), TestingFloor::ShouldCollect(Settings, { true, false }));
 	TestFalse(TEXT("Automation always disables collection"), TestingFloor::ShouldCollect(Settings, { false, true }));
 	TestFalse(TEXT("Editor automation ignores opt-in"), TestingFloor::ShouldCollect(Settings, { true, true }));
+	const auto Automatic = TestingFloor::FClient::Create(Settings);
+	TestEqual(TEXT("Default factory uses the real automation environment"), Automatic->GetState(), TestingFloor::EState::Disabled);
+	TestFalse(TEXT("Automatic clients cannot send during automation"), Automatic->Track(TEXT("example")));
 	Settings.WriteKey.Reset();
 	TestFalse(TEXT("SDK without a host-provided key cannot collect"), TestingFloor::ShouldCollect(Settings, {}));
 	const auto Transport = MakeShared<TestingFloorClientTests::FTransport>();
 	const auto Client = TestingFloor::FClient::Create(Settings, {}, Transport);
-	Client->StartSession();
 	TestFalse(TEXT("Disabled event rejected"), Client->Track(TEXT("player_weapon_fire")));
 	Client->Flush();
 	TestEqual(TEXT("Disabled SDK sends no request"), Transport->Bodies.Num(), 0);
@@ -130,7 +139,7 @@ bool FTestingFloorPayloadTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("64-bit integer keeps exact wire precision"), Transport->Bodies[0].Contains(TEXT("9007199254740993")));
 	const TSharedPtr<FJsonObject>* Metadata = nullptr;
 	TF_REQUIRE_TRUE(Payload->TryGetObjectField(TEXT("$tf"), Metadata) && Metadata && Metadata->IsValid(), "SDK metadata object");
-	TestEqual(TEXT("SDK metadata"), (*Metadata)->GetStringField(TEXT("sdk_version")), FString(TEXT("unreal-0.1.0")));
+	TestEqual(TEXT("SDK metadata"), (*Metadata)->GetStringField(TEXT("sdk_version")), FString(TEXT("0.2.0")));
 	return true;
 }
 
@@ -161,6 +170,16 @@ bool FTestingFloorRetryTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Revoked session accepts no further events"), Client->Track(TEXT("player_moved")));
 	Client->Tick(60.0);
 	TestEqual(TEXT("No repeated auth attempts"), Transport->Bodies.Num(), 2);
+	const auto InvalidTransport = MakeShared<TestingFloorClientTests::FTransport>();
+	const auto Recovering = TestingFloor::FClient::Create(TestingFloorClientTests::Settings(), {}, InvalidTransport);
+	Recovering->Track(TEXT("example"));
+	Recovering->Tick(10.0);
+	TF_REQUIRE_TRUE(InvalidTransport->Complete(503, false), "Transient failure received");
+	Recovering->Tick(11.0);
+	TF_REQUIRE_TRUE(InvalidTransport->Complete(400, false), "Invalid request response received");
+	TestEqual(TEXT("A responding collector is no longer reported as offline"), Recovering->GetState(), TestingFloor::EState::Ok);
+	TestEqual(TEXT("Invalid batch is dropped"), Recovering->GetPendingEventCount(), 0);
+
 	return true;
 }
 
@@ -241,37 +260,30 @@ bool FTestingFloorMovementTeleportTest::RunTest(const FString& Parameters)
 }
 
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecordingTest, "TestingFloor.Sdk.RecordingSessionHandoff", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecordingTest, "TestingFloor.Sdk.PlaySessionAndShutdown", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorRecordingTest::RunTest(const FString& Parameters)
 {
-	const FDateTime Now(2026, 10, 7, 12, 0, 0);
-	const auto Recording = TestingFloor::FRecordingContext::Parse(TEXT("{\"session_id\":\"recorder-session\",\"playtest_id\":42,\"suppress_qr\":false}"), Now);
-	TF_REQUIRE_TRUE(Recording.IsSet(), "Recorder payload accepted");
-	TestEqual(TEXT("Session-only handoff groups recording"), Recording->RecordingUUID, FString(TEXT("recorder-session")));
-	TestFalse(TEXT("Explicit QR policy retained"), Recording->bSuppressQR);
-	const FString Stale = FString::Printf(TEXT("{\"recording_uuid\":\"old\",\"created_at_unix_ms\":%lld}"), (Now - FTimespan::FromHours(13)).ToUnixTimestamp() * 1000LL);
-	TestFalse(TEXT("Stale recorder payload ignored"), TestingFloor::FRecordingContext::Parse(Stale, Now).IsSet());
-	TestFalse(TEXT("Missing recorder identity rejected"), TestingFloor::FRecordingContext::Parse(TEXT("{}"), Now).IsSet());
+	const auto Recording = TestingFloor::FRecordingContext::Parse(TEXT(R"TF({"recording_uuid":"example-recording","playtest_id":42,"suppress_qr":false})TF"), FDateTime::UtcNow());
+	TF_REQUIRE_TRUE(Recording.IsSet(), "Current recording handoff accepted");
 	auto Settings = TestingFloorClientTests::Settings();
 	Settings.Recording = Recording;
 	const auto Transport = MakeShared<TestingFloorClientTests::FTransport>();
 	const auto Client = TestingFloor::FClient::Create(Settings, {}, Transport);
-	Client->StartSession();
-	Client->StartSession();
-	Client->EndSession();
-	Client->EndSession();
-	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 1, "Lifecycle events batched once");
+	TestEqual(TEXT("Creation emits no synthetic session events"), Client->GetPendingEventCount(), 0);
+	TestNotEqual(TEXT("Play identity differs from recording"), Client->GetPlaySessionID(), Recording->RecordingUUID);
+	Client->Track(TEXT("level_started"));
+	Client->Shutdown(0.0);
+	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 1, "Shutdown flushes explicitly tracked events");
 	const auto Events = TestingFloorClientTests::ParseEvents(Transport->Bodies[0]);
-	TF_REQUIRE_TRUE(Events.Num() == 2, "Exactly one valid start and end");
-	TestEqual(TEXT("Session start"), Events[0]->GetStringField(TEXT("$name")), FString(TEXT("session_start")));
-	TestEqual(TEXT("Session end"), Events[1]->GetStringField(TEXT("$name")), FString(TEXT("session_end")));
-	TestNotEqual(TEXT("Play session identity differs from recorder session"), Client->GetSessionID(), Recording->SessionID);
-	const TSharedPtr<FJsonObject>* Metadata = nullptr;
-	TF_REQUIRE_TRUE(Events[0]->TryGetObjectField(TEXT("$tf"), Metadata) && Metadata && Metadata->IsValid(), "Recorder metadata object");
-	TestEqual(TEXT("Recorder session in TF metadata"), (*Metadata)->GetStringField(TEXT("session_id")), Recording->SessionID);
+	TF_REQUIRE_TRUE(Events.Num() == 1, "No legacy bookends added during shutdown");
+	TestEqual(TEXT("Play session is the envelope identity"), Events[0]->GetStringField(TEXT("$session_id")), Client->GetPlaySessionID());
+	TestEqual(TEXT("Recording identity captured separately"), Events[0]->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("recording_uuid")), Recording->RecordingUUID);
+	TestFalse(TEXT("Retired recorder session metadata is absent"), Events[0]->GetObjectField(TEXT("$tf"))->HasField(TEXT("session_id")));
+	TestFalse(TEXT("Closed clients reject later events"), Client->Track(TEXT("after_shutdown")));
+	Client->Shutdown(0.0);
+	TestEqual(TEXT("Repeated shutdown does not create events or requests"), Transport->Bodies.Num(), 1);
 	return true;
 }
-
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorBodyCapTest, "TestingFloor.Sdk.CollectorBodyCap", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorBodyCapTest::RunTest(const FString& Parameters)

@@ -25,41 +25,29 @@ C++ toolchain, including when you install it in a Blueprint project.
 
 ## Create a Client
 
-Keep one client per play session, for example as a member of your game instance
-subsystem. Initialize it on the game thread:
+Keep a `TSharedPtr<TestingFloor::FClient>` in your game instance or subsystem and
+initialize it once per play session:
 
 ```cpp
 #include "TestingFloor/TestingFloorClient.h"
-#include "HAL/PlatformTime.h"
-#include "Misc/CommandLine.h"
 
 TestingFloor::FSettings Settings;
-Settings.WriteKey = WriteKey;   // Your game's Testing Floor write key.
-Settings.DeviceID = DeviceID;   // Stable installation ID, persisted by your game.
-Settings.UserID = ProfileID;    // Optional, game-supplied profile ID.
-Settings.Recording = TestingFloor::FRecordingContext::FromCommandLine(
-    FCommandLine::Get(), FDateTime::UtcNow());
-
-Client = TestingFloor::FClient::Create(
-    Settings, {GIsEditor, GIsAutomationTesting}, TestingFloor::MakeHttpTransport());
-Client->StartSession();
+Settings.WriteKey = WriteKey; // Load your game's Testing Floor write key.
+Client = TestingFloor::FClient::Create(Settings);
 ```
 
-`Client` is a `TSharedPtr<TestingFloor::FClient>` member owned by your game.
-Populate optional app, engine, OS, locale, device, and screen metadata through
-`FSettings`. Get your write key from Testing Floor and supply it through your
-project's configuration. Do not commit real write keys. Missing credentials or
-an empty endpoint disable collection. Editor collection defaults off; set
-`bEnableInEditor` to opt in. Pass the actual automation flag so tests never send
-live telemetry.
+The default factory ticks on Unreal's core ticker, including during pause, and
+reads the current recorder handoff. It fills engine, OS, and locale metadata.
+Collection is off in the editor by default: set `bEnableInEditor` to opt in during
+integration. Automation always disables collection. Missing credentials or an
+empty endpoint disable sends. Keep real write keys out of source control.
 
-Tick the client with monotonic real time, including while gameplay is paused:
+Supply optional `DeviceID` (a stable installation UUID persisted by your game),
+`UserID` (your profile identity), `AppVersion`, and other metadata in `FSettings`.
+The SDK generates a fresh `GetPlaySessionID()` for every client. No synthetic
+session bookend events are emitted.
 
-```cpp
-Client->Tick(FPlatformTime::Seconds());
-```
-
-At the end of the play session, drain the queue before releasing the client:
+At the end of the play session, drain before releasing the client:
 
 ```cpp
 Client->Shutdown(2.0);
@@ -67,8 +55,14 @@ Client.Reset();
 ```
 
 Call client methods and transport completions on the game thread. Keep captured
-objects alive or use weak pointers in callbacks. A client cannot be restarted
-after `EndSession` or `Shutdown`; create a new one for the next play session.
+objects alive or use weak pointers in callbacks. Shutdown stops the automatic
+ticker and closes the client; create a new client for the next Play run.
+
+Custom transports and deterministic hosts can use the advanced
+`Create(Settings, Environment, Transport, Clock)` overload. That overload does
+not register a ticker or discover host metadata. Call `Tick()` or
+`Tick(monotonicSeconds)` yourself, including during pause, and pass the real
+automation flag when a custom environment is used.
 
 ## Track Events
 
@@ -89,7 +83,7 @@ Add shared game state to every event:
 
 ```cpp
 Client->SetContextProvider([](TestingFloor::FProperties& Context) {
-    Context.Set(TEXT("level.id"), TEXT("example-level"));
+    Context.Set(TEXT("game_level.id"), TEXT("example-level"));
 });
 ```
 
@@ -161,8 +155,8 @@ an optional reason, then resets the movement baseline.
 
 ## Recording Sync
 
-Recorder identity is separate from the client's fresh per-play session ID.
-`FRecordingContext::FromCommandLine` accepts `--testing-floor={json}`.
+Recording identity is separate from the client's fresh per-play session ID.
+`FRecordingContext::FromCommandLine` accepts `--testing-floor={"recording_uuid":"..."}`.
 `FRecordingContext::Resolve` tries the command line first, then sidecar JSON
 contents supplied by your game. The recorder owns sidecar file lifetime.
 Handoffs with a timestamp more than 12 hours old are ignored.
@@ -177,7 +171,7 @@ used by the client; `HasForceQrArgument` recognizes `--forceqr` / `-forceqr`.
 ```cpp
 #include "TestingFloor/TestingFloorQr.h"
 
-TestingFloor::FQrHeartbeat Heartbeat(Client->GetSessionID());
+TestingFloor::FQrHeartbeat Heartbeat(Client->GetPlaySessionID());
 TestingFloor::FQrSettings QrSettings;
 QrSettings.bEnabled = true; // Set from FQrPolicy::IsEnabled() in your integration.
 const FDateTime Now = FDateTime::UtcNow();
@@ -210,6 +204,8 @@ nor recorder process control.
 
 ## Development
 
+See [SDK_CONTRACT.md](SDK_CONTRACT.md) for the contract shared with the
+[Unity SDK](https://github.com/capitalisminc/testingfloor-sdk-unity).
 See [CONTRIBUTING.md](CONTRIBUTING.md) for release checks, Unreal automation tests,
 and source packaging.
 

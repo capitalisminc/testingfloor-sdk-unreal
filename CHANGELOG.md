@@ -1,18 +1,19 @@
 # Changelog
 
-All notable changes to this package are documented here. Versions follow SemVer.
+## 0.2.0 — Unreleased
 
-## Unreleased
+### Changed (breaking)
+
+- Canonical recorder handoffs require `recording_uuid`; removed recorder-session aliases and the old sidecar filename.
+- Play-session identity is distinct from recording identity, with no automatic session bookend events.
+- Typed properties reserve `$` keys, omit nonfinite values, and capture arrays by value.
+- Both SDKs use a bounded 4,096-event queue including requests in flight, drop newest on overflow, and retain transient failures for ordered retry.
+- Automated engine tests cannot enable live collection or forced QR markers.
+
+- `Create(Settings)` supplies automatic ticking, recorder discovery, and environment metadata. The custom-transport overload remains explicitly host-driven.
+- Renamed the session accessor to `GetPlaySessionID()` and removed `StartSession` / `EndSession`; use `Shutdown` at teardown.
 
 ### Added
 
-- Initial public source package, version `0.1.0`.
-- Native C++ telemetry client with typed event properties and shared context.
-- Bounded batching, retries, captured event identity, and best-effort shutdown.
-- Optional player/camera activity, debounced movement, and teleport events.
-- Recorder handoff parsing with separate recording and play-session identities.
-- QR sync payloads, encoding, heartbeat policy, and pixel generation.
-- Editor automation tests using mock transports and synthetic fixtures.
-
-The game supplies configuration, client lifetime, identity persistence, activity
-sources, and overlay rendering. No automatic game integration is included.
+- A shared SDK contract covering identity, units, fields, delivery limits, retry behavior, and safe defaults.
+- Current setup, lifecycle, diagnostics, testing, and migration documentation.
