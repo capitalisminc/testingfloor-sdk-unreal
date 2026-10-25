@@ -1,0 +1,32 @@
+name: SDK checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  source-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Check source release
+        run: python3 scripts/check_release.py
+      - name: Test release boundaries
+        run: python3 -m unittest discover -s Tests/Release -v
+      - name: Compile vendored QR encoder
+        run: >-
+          cc -std=c99 -Wall -Wextra -Werror -pedantic -c
+          Source/TestingFloorSdk/Private/ThirdParty/QrCodeGenerator/qrcodegen.c
+          -o "$RUNNER_TEMP/qrcodegen.o"
+      - name: Package source plugin
+        run: python3 scripts/package.py --output dist/TestingFloor-0.1.0.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TestingFloor-source
+          path: dist/TestingFloor-0.1.0.zip

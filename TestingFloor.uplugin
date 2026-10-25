@@ -1,0 +1,23 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Testing Floor SDK",
+	"Description": "Testing Floor telemetry and recording sync for Unreal Engine.",
+	"Category": "Analytics",
+	"CreatedBy": "Testing Floor",
+	"CanContainContent": false,
+	"Modules": [
+		{
+			"Name": "TestingFloorSdk",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "TestingFloorSdkTests",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
+		}
+	],
+	"CreatedByURL": "https://testingfloor.com"
+}

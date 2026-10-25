@@ -1,0 +1,26 @@
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vs/
+.vscode/
+
+# Unreal build output and generated projects
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+Build/
+dist/
+*.sln
+*.suo
+*.xcodeproj/
+*.xcworkspace/
+compile_commands.json
+
+# Local credentials and tools
+.env
+.env.*
+__pycache__/
+*.pyc
