@@ -141,7 +141,9 @@ bool FTestingFloorSequenceTest::RunTest(const FString& Parameters)
 	Client->Track(TEXT("player_death"));
 	Client->Tick(2.0);
 	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 2, "Retry after backoff");
-	const TArray<TSharedPtr<FJsonValue>>& Retried = Parse(Transport->Bodies[1])->GetArrayField(TEXT("events"));
+	const TSharedPtr<FJsonObject> Retry = Parse(Transport->Bodies[1]);
+	TF_REQUIRE(Retry.Get(), "Valid retry JSON");
+	const TArray<TSharedPtr<FJsonValue>>& Retried = Retry->GetArrayField(TEXT("events"));
 	TF_REQUIRE_TRUE(Retried.Num() == 3, "Retry carries the retained events and the new one");
 	TestEqual(TEXT("A retried record keeps its ID"), Retried[0]->AsObject()->GetStringField(TEXT("$id")), FirstEvents[0]->AsObject()->GetStringField(TEXT("$id")));
 	TestEqual(TEXT("A retried record keeps its seq"), Seq(Retried[0]->AsObject()), 1LL);
