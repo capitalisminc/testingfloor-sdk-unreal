@@ -36,6 +36,7 @@ private:
 struct TESTINGFLOORSDK_API FRecordingContext
 {
 	FString RecordingUUID;
+	FString TelemetryDirectory;
 	TOptional<int64> PlaytestID;
 	bool bSuppressQR = true;
 	/** Read the current launch argument or Saved/TestingFloor/recording-payload.json. */
@@ -91,6 +92,7 @@ struct FEvent
 	FString SessionID;
 	FProperties Properties;
 	FIntPoint ScreenSize = FIntPoint::ZeroValue;
+	TOptional<FRecordingContext> Recording;
 };
 
 /** Sources supply native Unreal centimeters and degrees. Movement metrics/thresholds remain meters. */
@@ -135,7 +137,7 @@ public:
 TESTINGFLOORSDK_API TSharedRef<ITransport> MakeHttpTransport();
 TESTINGFLOORSDK_API bool ShouldCollect(const FSettings& Settings, const FEnvironment& Environment);
 TESTINGFLOORSDK_API FString SerializeEvent(const FEvent& Event, const FSettings& Settings);
-TESTINGFLOORSDK_API FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FDateTime SentAt, int32& OutConsumed);
+TESTINGFLOORSDK_API FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FDateTime SentAt, int32& OutConsumed, int32* OutWritten = nullptr, int32* OutRecordingDropped = nullptr);
 
 /** Game-thread native client. No game module, UObjects, assets, or global singleton. */
 class TESTINGFLOORSDK_API FClient final : public TSharedFromThis<FClient>
@@ -182,6 +184,9 @@ public:
 private:
 	FClient(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock);
 	void CompleteSend(int32 ResponseCode, bool bSucceeded);
+	void FinishRecording();
+	bool bRecordingClosed = false;
+	bool bRecordingRegistered = false;
 	void SampleMovement(double NowSeconds, const FActivitySample& Sample);
 	void EmitMovement(const TCHAR* Reason, double Distance, double Duration, double Rotation, double FOV, double CameraDistance);
 	void FillActivityContext(FProperties& Properties, const FActivitySample& Sample) const;
@@ -203,6 +208,7 @@ private:
 	double NextRetrySeconds = 0.0;
 	double RetryDelaySeconds = 1.0;
 	int32 DroppedEvents = 0;
+	int32 RecordingDroppedEvents = 0;
 	bool bRequestInFlight = false;
 	bool bShutdown = false;
 	bool bFlushRequested = false;

@@ -47,7 +47,7 @@ Create a source ZIP without repository history, local configuration, generated
 files, or build output:
 
 ```sh
-python3 scripts/package.py --output dist/TestingFloor-0.2.0.zip
+python3 scripts/package.py --output dist/TestingFloor-0.3.0.zip
 ```
 
 The archive contains a `TestingFloor/` directory ready to copy into a project's

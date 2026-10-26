@@ -1,4 +1,7 @@
 #include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -190,6 +193,76 @@ bool FTestingFloorMovementPolicyTest::RunTest(const FString& Parameters)
 	Sample.PlayerPosition = FVector(10025.0, 0.0, 0.0);
 	Client->Tick(4.1);
 	TestEqual(TEXT("New movement starts without attributing disabled travel"), Client->GetPendingEventCount(), 3);
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecordingCompletionTest, "TestingFloor.Sdk.RecordingCompletionBarrier", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRecordingCompletionTest::RunTest(const FString& Parameters)
+{
+	class FDelayedTransport final : public TestingFloor::ITransport
+	{
+	public:
+		TArray<FString> Bodies;
+		TFunction<void(int32, bool)> Pending;
+		void Send(const FString&, const FString& Body, TFunction<void(int32, bool)> Completion) override
+		{
+			Bodies.Add(Body);
+			Pending = MoveTemp(Completion);
+		}
+		void Reply(int32 Code) { auto Callback = MoveTemp(Pending); Callback(Code, Code == 200); }
+	};
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	IFileManager::Get().MakeDirectory(*Directory, true);
+	auto Settings = TestingFloorRecordingTests::Settings();
+	TestingFloor::FRecordingContext Recording;
+	Recording.RecordingUUID = TEXT("example-recording");
+	Recording.TelemetryDirectory = Directory;
+	Settings.Recording = Recording;
+	Settings.QueueMaxEvents = 1;
+	const auto Transport = MakeShared<FDelayedTransport>();
+	const auto Client = TestingFloor::FClient::Create(Settings, {}, Transport);
+	TestTrue(TEXT("Registers its Play run before collecting"), IFileManager::Get().FileExists(*(Directory / (Client->GetPlaySessionID() + TEXT(".session")))));
+	Client->Track(TEXT("gameplay"));
+	Client->Flush();
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Client->Tick(1.0);
+	TestFalse(TEXT("Post-recording overflow is rejected without tainting recording delivery"), Client->Track(TEXT("after_recording_overflow")));
+	TestEqual(TEXT("No completion request can overtake gameplay"), Transport->Bodies.Num(), 1);
+	Transport->Reply(503);
+	Client->Tick(3.0);
+	TestEqual(TEXT("Failed gameplay is retried first"), Transport->Bodies.Num(), 2);
+	Transport->Reply(200);
+	Client->Tick(4.0);
+	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 3, "Completion follows the acknowledged retry");
+	const auto Body = TestingFloorRecordingTests::Parse(Transport->Bodies[2]);
+	const auto Events = Body->GetArrayField(TEXT("events"));
+	TestEqual(TEXT("Marker owns its request"), Events.Num(), 1);
+	TestEqual(TEXT("Final marker name"), Events[0]->AsObject()->GetStringField(TEXT("$name")), FString(TEXT("$tf_telemetry_complete")));
+	TestEqual(TEXT("Marker reports losses"), Events[0]->AsObject()->GetIntegerField(TEXT("dropped_events")), 0);
+	Transport->Reply(200);
+	Client->Track(TEXT("after_recording"));
+	const auto Later = TestingFloorRecordingTests::Parse(TestingFloor::SerializeEvent(Client->GetQueuedEvents().Last(), Settings));
+	TestFalse(TEXT("Later gameplay is not attached to a closed recording"), Later->GetObjectField(TEXT("$tf"))->HasField(TEXT("recording_uuid")));
+	Client->Shutdown(0.0);
+	const FString LossDirectory = Directory / TEXT("losses");
+	IFileManager::Get().MakeDirectory(*LossDirectory, true);
+	Settings.Recording->TelemetryDirectory = LossDirectory;
+	const auto LossTransport = MakeShared<FDelayedTransport>();
+	const auto LossClient = TestingFloor::FClient::Create(Settings, {}, LossTransport);
+	LossClient->Track(TEXT("recording_gameplay"));
+	TestFalse(TEXT("Overflow before closure drops recording gameplay"), LossClient->Track(TEXT("recording_overflow")));
+	LossClient->Flush();
+	FFileHelper::SaveStringToFile(TEXT("1"), *(LossDirectory / TEXT("closed.json")));
+	LossClient->Tick(1.0);
+	LossTransport->Reply(200);
+	LossClient->Tick(2.0);
+	TF_REQUIRE_TRUE(LossTransport->Bodies.Num() == 2, "Loss marker follows gameplay");
+	const auto LossBody = TestingFloorRecordingTests::Parse(LossTransport->Bodies[1]);
+	TestEqual(TEXT("Recording-associated losses remain explicit"), LossBody->GetArrayField(TEXT("events"))[0]->AsObject()->GetIntegerField(TEXT("dropped_events")), 1);
+	LossTransport->Reply(200);
+	LossClient->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
 	return true;
 }
 
