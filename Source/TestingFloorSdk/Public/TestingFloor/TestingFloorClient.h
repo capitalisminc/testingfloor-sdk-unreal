@@ -137,7 +137,7 @@ public:
 TESTINGFLOORSDK_API TSharedRef<ITransport> MakeHttpTransport();
 TESTINGFLOORSDK_API bool ShouldCollect(const FSettings& Settings, const FEnvironment& Environment);
 TESTINGFLOORSDK_API FString SerializeEvent(const FEvent& Event, const FSettings& Settings);
-TESTINGFLOORSDK_API FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FDateTime SentAt, int32& OutConsumed, int32* OutWritten = nullptr);
+TESTINGFLOORSDK_API FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FDateTime SentAt, int32& OutConsumed, int32* OutWritten = nullptr, int32* OutRecordingDropped = nullptr);
 
 /** Game-thread native client. No game module, UObjects, assets, or global singleton. */
 class TESTINGFLOORSDK_API FClient final : public TSharedFromThis<FClient>
@@ -208,6 +208,7 @@ private:
 	double NextRetrySeconds = 0.0;
 	double RetryDelaySeconds = 1.0;
 	int32 DroppedEvents = 0;
+	int32 RecordingDroppedEvents = 0;
 	bool bRequestInFlight = false;
 	bool bShutdown = false;
 	bool bFlushRequested = false;

@@ -32,7 +32,7 @@ cannot produce an undiscovered run.
 The SDK watches `closed.json` while Play continues. Closing the recording or
 shutting down a Play run stops attaching new events to that recording and queues
 `$tf_telemetry_complete`. The marker carries the recording UUID, Play-session ID
-and `dropped_events`. It owns a separate request, sent only after preceding
+and recording-scoped `dropped_events`. It owns a separate request, sent only after preceding
 requests succeed or are explicitly counted as dropped. It bypasses the gameplay
 queue capacity. A nonzero dropped count means incomplete telemetry.
 

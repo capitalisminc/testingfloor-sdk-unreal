@@ -20,6 +20,16 @@ namespace TestingFloor
 {
 namespace Private
 {
+int32 RecordingEventCount(TConstArrayView<FEvent> Events)
+{
+	int32 Count = 0;
+	for (const FEvent& Event : Events)
+	{
+		if (Event.Recording.IsSet() && Event.Name != TEXT("$tf_telemetry_complete")) ++Count;
+	}
+	return Count;
+}
+
 constexpr int32 EventByteCap = 32 << 10;
 constexpr int32 BodyByteCap = (1 << 20) - (8 << 10);
 
@@ -431,7 +441,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 	return Private::Encode(Object);
 }
 
-FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FDateTime SentAt, int32& OutConsumed, int32* OutWritten)
+FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FDateTime SentAt, int32& OutConsumed, int32* OutWritten, int32* OutRecordingDropped)
 {
 	FString Body;
 	const auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Body);
@@ -441,6 +451,7 @@ FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FD
 	Writer->WriteArrayStart(TEXT("events"));
 	int32 BodyBytes = Private::Utf8Length(Body) + 2;
 	int32 Written = 0;
+	int32 RecordingDropped = 0;
 	OutConsumed = 0;
 	for (const FEvent& Event : Events)
 	{
@@ -455,6 +466,7 @@ FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FD
 		const int32 EventBytes = Private::Utf8Length(EventJson);
 		if (EventBytes > Private::EventByteCap)
 		{
+			if (Event.Recording.IsSet() && Event.Name != TEXT("$tf_telemetry_complete")) ++RecordingDropped;
 			++OutConsumed;
 			continue;
 		}
@@ -471,6 +483,7 @@ FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FD
 	Writer->WriteObjectEnd();
 	Writer->Close();
 	if (OutWritten) *OutWritten = Written;
+	if (OutRecordingDropped) *OutRecordingDropped = RecordingDropped;
 	return Written > 0 ? Body : FString();
 }
 
@@ -612,13 +625,14 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 	{
 		return false;
 	}
+	if (bRecordingRegistered && !bRecordingClosed
+		&& IFileManager::Get().FileExists(*(Settings.Recording->TelemetryDirectory / TEXT("closed.json")))) FinishRecording();
 	if (GetPendingEventCount() >= FMath::Max(1, Settings.QueueMaxEvents))
 	{
 		++DroppedEvents;
+		if (!bRecordingClosed && Settings.Recording.IsSet()) ++RecordingDroppedEvents;
 		return false;
 	}
-	if (bRecordingRegistered && !bRecordingClosed
-		&& IFileManager::Get().FileExists(*(Settings.Recording->TelemetryDirectory / TEXT("closed.json")))) FinishRecording();
 	FEvent Event{ FGuid::NewGuid(), Name, Clock(), SessionID, {} };
 	if (!bRecordingClosed) Event.Recording = Settings.Recording;
 	if (ContextProvider)
@@ -639,6 +653,7 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 	if (Private::Utf8Length(SerializeEvent(Event, Settings)) > Private::EventByteCap)
 	{
 		++DroppedEvents;
+		if (!bRecordingClosed && Settings.Recording.IsSet()) ++RecordingDroppedEvents;
 		return false;
 	}
 	Queue.Add(MoveTemp(Event));
@@ -696,10 +711,12 @@ void FClient::Flush()
 	int32 Consumed = 0;
 	if (Queue[0].Name == TEXT("$tf_telemetry_complete"))
 	{
-		Queue[0].Properties.Set(TEXT("dropped_events"), DroppedEvents);
+		Queue[0].Properties.Set(TEXT("dropped_events"), RecordingDroppedEvents);
 	}
 	int32 Written = 0;
-	const FString Body = BuildBatch(Queue, Settings, Clock(), Consumed, &Written);
+	int32 RecordingSkipped = 0;
+	const FString Body = BuildBatch(Queue, Settings, Clock(), Consumed, &Written, &RecordingSkipped);
+	RecordingDroppedEvents += RecordingSkipped;
 	DroppedEvents += Consumed - Written;
 	if (Consumed == 0)
 	{
@@ -745,6 +762,8 @@ void FClient::CompleteSend(int32 ResponseCode, bool bSucceeded)
 	{
 		State = EState::Rejected;
 		DroppedEvents += InFlight.Num() + Queue.Num();
+		RecordingDroppedEvents += Private::RecordingEventCount(InFlight);
+		RecordingDroppedEvents += Private::RecordingEventCount(Queue);
 		InFlight.Reset();
 		Queue.Reset();
 	}
@@ -754,6 +773,7 @@ void FClient::CompleteSend(int32 ResponseCode, bool bSucceeded)
 		RetryDelaySeconds = 1.0;
 		NextRetrySeconds = 0.0;
 		DroppedEvents += InFlight.Num();
+		RecordingDroppedEvents += Private::RecordingEventCount(InFlight);
 		InFlight.Reset();
 		bFlushRequested = !Queue.IsEmpty();
 	}
