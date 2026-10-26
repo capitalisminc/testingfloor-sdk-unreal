@@ -131,7 +131,7 @@ bool FTestingFloorPayloadTest::RunTest(const FString& Parameters)
 	const TSharedPtr<FJsonObject> Payload = Events[0];
 	TestEqual(TEXT("Event name cannot be overwritten by properties"), Payload->GetStringField(TEXT("$name")), FString(TEXT("player_weapon_fire")));
 	TestEqual(TEXT("Timestamp captured at enqueue"), Payload->GetStringField(TEXT("$time")), Timestamp.ToIso8601());
-	TestEqual(TEXT("Schema matches collector"), Payload->GetIntegerField(TEXT("$schema")), 1);
+	TestEqual(TEXT("Schema matches collector"), Payload->GetIntegerField(TEXT("$schema")), 2);
 	TestEqual(TEXT("Event overrides context, then owns snapshot"), Payload->GetStringField(TEXT("weapon.id")), FString(TEXT("plasma_rifle")));
 	TestEqual(TEXT("Context is captured before later edits"), Payload->GetStringField(TEXT("captured")), FString(TEXT("before")));
 	TestTrue(TEXT("Boolean remains boolean"), Payload->GetBoolField(TEXT("hit")));

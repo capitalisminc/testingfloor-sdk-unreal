@@ -15,6 +15,7 @@ Source/TestingFloorSdk/Public/TestingFloor/TestingFloorQr.h
 Source/TestingFloorSdk/TestingFloorSdk.Build.cs
 Source/TestingFloorSdkTests/Private/TestingFloorQrTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorRecordingTests.cpp
+Source/TestingFloorSdkTests/Private/TestingFloorSchemaTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorSdkTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorSdkTestsModule.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorTestHelpers.h

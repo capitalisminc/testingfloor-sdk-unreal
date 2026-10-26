@@ -66,7 +66,7 @@ snapshot of typed `FProperties` for each call.
 | Setting | Default / limit |
 | --- | --- |
 | Endpoint | `https://dataentry.testingfloor.com/v1/batch` |
-| Event envelope | `$id`, `$name`, `$time`, `$schema: 1`, `$session_id`, optional identities and `$tf` |
+| Event envelope | `$id`, `$name`, `$time`, `$schema: 2`, `$session_id`, optional identities and `$tf` |
 | Request envelope | `$write_key`, `$sent_at`, `events` |
 | Batch size | 50 events; configurable up to 2,000 |
 | Flush interval | 0.25 seconds |
@@ -99,10 +99,10 @@ can lose events. Pending and dropped counters provide local diagnostics.
 | Default world units per meter | 1 | 100 |
 
 Every available player or camera sample attaches `player.position.*`,
-`camera.position.*`, `camera.euler.*`, `camera.forward.*`, `camera.fov`,
-`camera.fov_axis`, and `viewport.width` / `viewport.height`. Missing sources omit
-their fields. Native camera Euler conventions differ; use `camera.forward` and
-the map's configured axes for spatial projection.
+`camera.position.*`, `camera.euler.*`, `camera.forward.*`, and `camera.fov` to
+events. `camera.fov_axis` and `viewport.width` / `viewport.height` are session
+state. Missing sources omit their fields. Native camera Euler conventions differ;
+use `camera.forward` and the map's configured axes for spatial projection.
 
 Movement defaults off. Opting in emits debounced `player_moved` events for
 player movement or camera-only position, rotation, and FOV changes. Reasons are
@@ -127,3 +127,26 @@ Defaults are a 15-second interval, continuous visibility, inverted colors, and a
 four-module quiet zone. Recorder suppression hides the marker unless explicitly
 overridden; `--forceqr` and `-forceqr` are recognized. Unity supplies the overlay;
 Unreal supplies marker pixels for the host game's UI.
+
+## Schema 2: session state and tracked objects
+
+Every record is sent with `$schema: 2` and `$tf.seq`: a counter that starts at 1 for each play session and increases by one for every record the SDK queues, including events, `$tf_state` and `$tf_objects`. A retried record keeps its seq.
+
+### Session state (`$tf_state`)
+
+- State providers supply values that stay true until they change, such as settings, device, build, inventory and outfit. The existing context provider stays for small values that describe each moment, such as level, health and game clock, and its values are still added to every event.
+- The SDK reads state providers before each event and once a second, in unscaled time, including while gameplay is paused. If a value changed, it queues one `$tf_state` record that holds only the changed keys, before the event. A removed key is sent as `null`.
+- A keyframe repeats every current value and sets `$tf.keyframe: true`. The SDK sends one when the play session starts, when a recording starts, every 5 minutes, and after it drops any record.
+- The SDK moves its own device, engine and build fields, `viewport.width`, `viewport.height` and `camera.fov_axis` into state. Camera pose, `camera.fov` and the player position stay on events.
+- `$tf_state` records carry no context-provider values and no player or camera fields.
+
+### Tracked objects (`$tf_objects`)
+
+- A game registers an object with a kind, a position source and an optional id. Without an id the SDK assigns `kind#n`, counting per kind for each play session.
+- The SDK checks live objects 4 times a second (setting: 1–10) in unscaled time. It sends a sample when an object is registered, and after that only when the object has moved at least 0.25 m since its last sent sample.
+- Removing an object sends its final position and a reason. SDK reasons are `destroyed` (the engine object is gone), `gone` (the position source returned nothing) and `disabled` (a tracking component was disabled).
+- Object state values are scalars. Only changed values are sent.
+- Every 5 minutes, and after the SDK drops any record, a keyframe record repeats every live object with its position and full state.
+- A record holds parallel arrays: `sample.id`, `sample.kind`, `sample.x`, `sample.y`, `sample.z`; `removed.id`, `removed.reason`; `state.id`, `state.key`, `state.value`. Positions use native units, rounded to 1 cm. A record holds at most 300 samples; a larger check is split into several records with the same `$time`. Records copy the `game_level.*` values from the most recent event and carry no other context and no player or camera fields. The SDK sends no record when nothing changed.
+- At most 256 objects are live (setting). Further registrations are ignored, with one warning.
+- With collection disabled, registration returns a handle that does nothing, and nothing is sampled.
