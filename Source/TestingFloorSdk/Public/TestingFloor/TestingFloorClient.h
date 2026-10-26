@@ -240,6 +240,7 @@ private:
 	void SetObjectStateValue(uint64 Token, const FString& Key, const FProperties& Value);
 	void CheckObjects();
 	bool HasPendingRemoval(const FString& ID) const;
+	void TrimPendingRemovals();
 	struct FObjectRows;
 	void QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe);
 

@@ -39,7 +39,9 @@ constexpr double KeyframeSeconds = 300.0;
 constexpr double ObjectMinMoveCentimeters = 25.0;
 constexpr int32 ObjectRecordMaxSamples = 300;
 /** Leaves room under the event cap for the envelope and copied level values. */
-constexpr int32 ObjectRecordByteBudget = 24 << 10;
+constexpr int32 ObjectRecordByteBudget = 20 << 10;
+constexpr int32 CoordinateBytes = 12;
+constexpr int32 NumberBytes = 25;
 const TCHAR* const StateRecordName = TEXT("$tf_state");
 const TCHAR* const ObjectsRecordName = TEXT("$tf_objects");
 
@@ -180,14 +182,33 @@ TSharedPtr<FJsonValue> Centimeters(double Value)
 	return MakeShared<FJsonValueNumber>(Rounded == 0.0 ? 0.0 : Rounded);
 }
 
+/** A JSON string's wire size: UTF-8 bytes, quotes and separator, and escapes. */
+int32 JsonStringBytes(const FString& Value)
+{
+	int32 Bytes = Utf8Length(Value) + 3;
+	for (const TCHAR Character : Value)
+	{
+		if (Character == TEXT('"') || Character == TEXT('\\'))
+		{
+			Bytes += 1;
+		}
+		else if (Character < TEXT(' '))
+		{
+			Bytes += 5;
+		}
+	}
+	return Bytes;
+}
+
 int32 EstimateBytes(const FString& ID, const FString& Kind, int32 Samples, const TArray<TPair<FString, TSharedPtr<FJsonValue>>>& State, const FString& Reason)
 {
-	int32 Bytes = Samples * (ID.Len() + Kind.Len() + 48);
+	int32 Bytes = Samples * (JsonStringBytes(ID) + JsonStringBytes(Kind) + 3 * CoordinateBytes);
 	for (const auto& Pair : State)
 	{
-		Bytes += ID.Len() + Pair.Key.Len() + (Pair.Value->Type == EJson::String ? Pair.Value->AsString().Len() : 24) + 12;
+		const bool bString = Pair.Value->Type == EJson::String;
+		Bytes += JsonStringBytes(ID) + JsonStringBytes(Pair.Key) + (bString ? JsonStringBytes(Pair.Value->AsString()) : NumberBytes) + 2;
 	}
-	return Bytes + (Reason.IsEmpty() ? 0 : ID.Len() + Reason.Len() + 8);
+	return Bytes + (Reason.IsEmpty() ? 0 : JsonStringBytes(ID) + JsonStringBytes(Reason) + 1);
 }
 } // namespace Private
 
@@ -992,7 +1013,14 @@ void FClient::Shutdown(double TimeoutSeconds)
 	TickerHandle.Reset();
 	if (IsCollecting())
 	{
-		// Send registrations, removals and state changes that are waiting for the next check.
+		// Send state changes since the last poll, then registrations, removals and object state
+		// changes that are waiting for the next check.
+		TOptional<FActivitySample> Sample;
+		if (ActivitySource)
+		{
+			Sample = ActivitySource();
+		}
+		PollState(Clock(), Sample.GetPtrOrNull());
 		CheckObjects();
 	}
 	bShutdown = true;
@@ -1256,11 +1284,24 @@ void FClient::RemoveObject(uint64 Token, const FString& Reason)
 	}
 	Rows.RemovedReason = Reason.TrimStartAndEnd().IsEmpty() ? FString(TEXT("removed")) : Reason.TrimStartAndEnd();
 	PendingRemovals.Add(MoveTemp(Rows));
+	TrimPendingRemovals();
 }
 
 bool FClient::HasPendingRemoval(const FString& ID) const
 {
 	return PendingRemovals.ContainsByPredicate([&ID](const FObjectRows& Rows) { return Rows.ID == ID; });
+}
+
+void FClient::TrimPendingRemovals()
+{
+	// Readers end a path only on its removal, so refused removals are retried, but no more of them
+	// than live objects. The newest overflow is dropped, counted, and followed by a keyframe.
+	const int32 Excess = PendingRemovals.Num() - FMath::Max(1, Settings.MaxTrackedObjects);
+	if (Excess > 0)
+	{
+		PendingRemovals.RemoveAt(PendingRemovals.Num() - Excess, Excess);
+		NoteDropped(Excess, ActiveRecording().IsSet() ? Excess : 0);
+	}
 }
 
 int32 FClient::GetTrackedObjectCount() const
@@ -1434,6 +1475,7 @@ void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
 	}
 	// Refused removals are earlier lifetimes than any carried to the next check, so they go first.
 	PendingRemovals.Insert(MoveTemp(Refused), 0);
+	TrimPendingRemovals();
 }
 
 EState FClient::GetState() const

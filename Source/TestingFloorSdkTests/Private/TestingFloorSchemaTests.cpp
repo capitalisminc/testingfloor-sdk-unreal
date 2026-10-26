@@ -383,6 +383,82 @@ bool FTestingFloorReplacementRemovedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorNonAsciiBudgetTest, "TestingFloor.Sdk.Schema2.NonAsciiObjectRecordsFit", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorNonAsciiBudgetTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const auto Client = Create(Settings());
+	// Three UTF-8 bytes per character, so a character count underestimates the wire size.
+	const FString Kind = FString::ChrN(100, static_cast<TCHAR>(0x7269));
+	for (int32 Index = 0; Index < 100; ++Index)
+	{
+		const FString ID = FString::ChrN(100, static_cast<TCHAR>(0x4E2D)) + FString::FromInt(Index);
+		Client->TrackObject(Kind, [Index] { return TOptional<FVector>(FVector(Index * 100.0, 0.0, 0.0)); }, ID);
+	}
+	Client->Tick(0.0);
+	TestEqual(TEXT("No object record is rejected for size"), Client->GetDroppedEventCount(), 0);
+	int32 Samples = 0;
+	for (const TestingFloor::FEvent& Event : Client->GetQueuedEvents())
+	{
+		const FString Json = TestingFloor::SerializeEvent(Event, Settings());
+		TestTrue(TEXT("Each record fits the 32 KiB event cap"), FTCHARToUTF8(*Json).Length() <= 32 * 1024);
+		Samples += Count(Parse(Json), TEXT("sample.id"));
+	}
+	TestTrue(TEXT("Large IDs split into several records"), Client->GetQueuedEvents().Num() > 1);
+	TestEqual(TEXT("Every object is sent"), Samples, 100);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRemovalCapTest, "TestingFloor.Sdk.Schema2.RetriedRemovalsAreBounded", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRemovalCapTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	auto ClientSettings = Settings();
+	ClientSettings.QueueMaxEvents = 1;
+	ClientSettings.MaxTrackedObjects = 2;
+	const auto Transport = MakeShared<FTransport>();
+	const auto Client = Create(ClientSettings, Transport);
+	Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }, TEXT("d"));
+	Client->Track(TEXT("level_loaded"));
+	for (const TCHAR* ID : { TEXT("a"), TEXT("b"), TEXT("c") })
+	{
+		const uint64 Token = Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }, ID);
+		Client->RemoveObject(Token, TEXT("destroyed"));
+	}
+	TestEqual(TEXT("Waiting removals are capped at the live-object limit"), Client->GetDroppedEventCount(), 1);
+	Client->Tick(0.0);
+	TestEqual(TEXT("A full queue refuses the removal record"), Client->GetDroppedEventCount(), 2);
+	Client->Flush();
+	TF_REQUIRE_TRUE(Transport->Complete(200), "Queue drained");
+	Client->Tick(0.25);
+	const auto Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(Objects.Num() == 1, "Retried removals");
+	TestEqual(TEXT("Refused removals are retried; the overflow is not"), Array(Objects[0], TEXT("removed.id")), FString(TEXT("a,b")));
+	TestTrue(TEXT("The drops start a keyframe"), IsKeyframe(Objects[0]));
+	TestTrue(TEXT("The keyframe repeats the live object"), Array(Objects[0], TEXT("sample.id")).EndsWith(TEXT("d")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorShutdownStateTest, "TestingFloor.Sdk.Schema2.ShutdownSendsLastState", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorShutdownStateTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const auto Transport = MakeShared<FTransport>();
+	const auto Client = Create(Settings(), Transport);
+	int32 Volume = 1;
+	Client->SetStateProvider([&Volume](TestingFloor::FProperties& State) { State.Set(TEXT("pref.volume"), Volume); });
+	Client->Tick(0.0);
+	Volume = 2;
+	Client->Shutdown(0.0);
+	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 1, "Shutdown flushes");
+	const TSharedPtr<FJsonObject> Body = Parse(Transport->Bodies[0]);
+	TF_REQUIRE(Body.Get(), "Valid shutdown JSON");
+	const TArray<TSharedPtr<FJsonValue>>& Sent = Body->GetArrayField(TEXT("events"));
+	TF_REQUIRE_TRUE(Sent.Num() == 2, "Start keyframe and the last change");
+	TestEqual(TEXT("The change after the last poll is sent at shutdown"), Sent[1]->AsObject()->GetIntegerField(TEXT("pref.volume")), 2);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorObjectSamplingTest, "TestingFloor.Sdk.Schema2.ObjectSamplingAndRemoval", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorObjectSamplingTest::RunTest(const FString& Parameters)
 {
