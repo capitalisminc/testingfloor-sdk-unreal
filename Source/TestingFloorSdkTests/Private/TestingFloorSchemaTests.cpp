@@ -895,4 +895,41 @@ bool FTestingFloorCloseBufferedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorCloseRefusedTest, "TestingFloor.Sdk.Schema2.RecordingCloseKeepsRefusedRemovals", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorCloseRefusedTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	IFileManager::Get().MakeDirectory(*Directory, true);
+	auto ClientSettings = Settings();
+	TestingFloor::FRecordingContext Recording;
+	Recording.RecordingUUID = TEXT("example-recording");
+	Recording.TelemetryDirectory = Directory;
+	ClientSettings.Recording = Recording;
+	ClientSettings.QueueMaxEvents = 2;
+	const auto Transport = MakeShared<FTransport>();
+	const auto Client = Create(ClientSettings, Transport);
+	const uint64 Crate = Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }, TEXT("crate"));
+	Client->Tick(0.0);
+	Client->Track(TEXT("level_loaded"));
+	Client->RemoveObject(Crate, TEXT("destroyed"));
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Client->Tick(0.1);
+	TF_REQUIRE_TRUE(Transport->Complete(200), "Gameplay delivered");
+	Client->Tick(0.2);
+	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 2, "Marker sent");
+	const TSharedPtr<FJsonObject> Body = Parse(Transport->Bodies[1]);
+	TF_REQUIRE(Body.Get(), "Valid marker JSON");
+	TestEqual(TEXT("The refused removal counts against the recording"), Body->GetArrayField(TEXT("events"))[0]->AsObject()->GetIntegerField(TEXT("dropped_events")), 1);
+	TF_REQUIRE_TRUE(Transport->Complete(200), "Marker delivered");
+	Client->Tick(0.25);
+	const auto Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(Objects.Num() == 1, "The play session still receives the removal");
+	TestEqual(TEXT("Retried removal"), Array(Objects[0], TEXT("removed.id")), FString(TEXT("crate")));
+	TestFalse(TEXT("It no longer carries the closed recording"), HasRecording(Objects[0]));
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
 #endif

@@ -930,13 +930,13 @@ void FClient::CheckRecordingClosed()
 		if (IsCollecting())
 		{
 			// Records captured while the recording was open go out with it, ahead of its marker.
-			SendBufferedRecords();
+			SendBufferedRecords(false);
 		}
 		FinishRecording();
 	}
 }
 
-void FClient::SendBufferedRecords()
+void FClient::SendBufferedRecords(bool bShuttingDown)
 {
 	TOptional<FActivitySample> Sample;
 	if (ActivitySource)
@@ -955,9 +955,11 @@ void FClient::SendBufferedRecords()
 			break;
 		}
 	}
-	if (!PendingRemovals.IsEmpty())
+	// A refused removal was already counted as a dropped record. When a recording closes the play
+	// session continues, so the removal still waits for a later check and goes out without the
+	// recording; only shutdown abandons it, counting it so the completion marker reports it.
+	if (bShuttingDown && !PendingRemovals.IsEmpty())
 	{
-		// Removals that never reach the queue are counted, so the completion marker reports them.
 		const int32 Abandoned = PendingRemovals.Num();
 		PendingRemovals.Reset();
 		NoteDropped(Abandoned, ActiveRecording().IsSet() ? Abandoned : 0);
@@ -1066,7 +1068,7 @@ void FClient::Shutdown(double TimeoutSeconds)
 	TickerHandle.Reset();
 	if (IsCollecting())
 	{
-		SendBufferedRecords();
+		SendBufferedRecords(true);
 	}
 	bShutdown = true;
 	FinishRecording();
