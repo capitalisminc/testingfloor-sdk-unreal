@@ -226,6 +226,10 @@ private:
 	FClient(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock);
 	void CompleteSend(int32 ResponseCode, bool bSucceeded);
 	void FinishRecording();
+	void CheckRecordingClosed();
+	/** Queue state changes and object rows that are waiting for the next poll or check. At shutdown,
+	 *  removals the queue still refuses are abandoned; otherwise they wait for later checks. */
+	void SendBufferedRecords(bool bShuttingDown);
 	bool bRecordingClosed = false;
 	bool bRecordingRegistered = false;
 	void SampleMovement(double NowSeconds, const FActivitySample& Sample);
