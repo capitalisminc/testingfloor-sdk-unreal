@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0 — Unreleased
+
+Telemetry schema 2: values that rarely change are sent once, and world objects get paths.
+
+### Changed (breaking)
+
+- Every record is sent with `$schema: 2` and `$tf.seq`, a per-play-session counter that a retry keeps.
+- `viewport.width`, `viewport.height` and `camera.fov_axis` are session state instead of event properties. Camera pose, `camera.fov` and the player position stay on events.
+- Pending and dropped counts include `$tf_state` and `$tf_objects` records.
+
+### Added
+
+- `SetStateProvider`, `SetState` and `ClearState` for values that stay true until they change. The SDK sends changes as `$tf_state` records before the next event and once a second, with keyframes at play-session start, every 5 minutes and after a drop. `SetContextProvider` stays for small per-event values.
+- `TrackObject`, `SetObjectState` and `RemoveObject` for NPCs, props and projectiles. The SDK checks live objects 4 times a second (`FSettings::ObjectChecksPerSecond`, 1–10) and batches positions, state and removals into `$tf_objects` records. `FSettings::MaxTrackedObjects` (default 256) limits live objects.
+- Recording delivery completion covers the new records: `$tf_telemetry_complete` takes the next `$tf.seq`, dropped `$tf_state` and `$tf_objects` records count toward `dropped_events`, state and object records stop carrying a closed recording's UUID, and registering with a recording starts state and object keyframes.
+
 ## 0.3.0
 
 - Register each Play run with its recorder and close recording telemetry with an acknowledged flush marker.

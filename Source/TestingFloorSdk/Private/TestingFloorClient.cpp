@@ -16,6 +16,8 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogTestingFloor, Log, All);
+
 namespace TestingFloor
 {
 namespace Private
@@ -32,6 +34,16 @@ int32 RecordingEventCount(TConstArrayView<FEvent> Events)
 
 constexpr int32 EventByteCap = 32 << 10;
 constexpr int32 BodyByteCap = (1 << 20) - (8 << 10);
+constexpr double StatePollSeconds = 1.0;
+constexpr double KeyframeSeconds = 300.0;
+constexpr double ObjectMinMoveCentimeters = 25.0;
+constexpr int32 ObjectRecordMaxSamples = 300;
+/** Leaves room under the event cap for the envelope and copied level values. */
+constexpr int32 ObjectRecordByteBudget = 20 << 10;
+constexpr int32 CoordinateBytes = 12;
+constexpr int32 NumberBytes = 25;
+const TCHAR* const StateRecordName = TEXT("$tf_state");
+const TCHAR* const ObjectsRecordName = TEXT("$tf_objects");
 
 FString Encode(const TSharedRef<FJsonObject>& Object)
 {
@@ -151,6 +163,52 @@ FVector4d ActivityStep(const FActivitySample& Current, const FActivitySample& Pr
 		Rotation > 0.0 && Rotation >= Settings.MinStepRotationDegrees ? Rotation : 0.0,
 		FOV > 0.0 && FOV >= Settings.MinStepFOVDegrees ? FOV : 0.0,
 		CameraDistance > 0.0 && CameraDistance >= Settings.MinStepCameraDistance ? CameraDistance : 0.0);
+}
+
+bool SameValue(const TSharedPtr<FJsonValue>& Left, const TSharedPtr<FJsonValue>& Right)
+{
+	return Left.IsValid() && Right.IsValid() && FJsonValue::CompareEqual(*Left, *Right);
+}
+
+TOptional<FVector> FinitePosition(const TOptional<FVector>& Position)
+{
+	return Position.IsSet() && !Position->ContainsNaN() ? Position : TOptional<FVector>();
+}
+
+/** Native centimeters rounded to 1 cm, without a negative zero. */
+TSharedPtr<FJsonValue> Centimeters(double Value)
+{
+	const double Rounded = FMath::RoundToDouble(Value);
+	return MakeShared<FJsonValueNumber>(Rounded == 0.0 ? 0.0 : Rounded);
+}
+
+/** A JSON string's wire size: UTF-8 bytes, quotes and separator, and escapes. */
+int32 JsonStringBytes(const FString& Value)
+{
+	int32 Bytes = Utf8Length(Value) + 3;
+	for (const TCHAR Character : Value)
+	{
+		if (Character == TEXT('"') || Character == TEXT('\\'))
+		{
+			Bytes += 1;
+		}
+		else if (Character < TEXT(' '))
+		{
+			Bytes += 5;
+		}
+	}
+	return Bytes;
+}
+
+int32 EstimateBytes(const FString& ID, const FString& Kind, int32 Samples, const TArray<TPair<FString, TSharedPtr<FJsonValue>>>& State, const FString& Reason)
+{
+	int32 Bytes = Samples * (JsonStringBytes(ID) + JsonStringBytes(Kind) + 3 * CoordinateBytes);
+	for (const auto& Pair : State)
+	{
+		const bool bString = Pair.Value->Type == EJson::String;
+		Bytes += JsonStringBytes(ID) + JsonStringBytes(Pair.Key) + (bString ? JsonStringBytes(Pair.Value->AsString()) : NumberBytes) + 2;
+	}
+	return Bytes + (Reason.IsEmpty() ? 0 : JsonStringBytes(ID) + JsonStringBytes(Reason) + 1);
 }
 } // namespace Private
 
@@ -399,7 +457,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 	Object->SetStringField(TEXT("$id"), Event.ID.ToString(EGuidFormats::DigitsWithHyphensLower));
 	Object->SetStringField(TEXT("$name"), Event.Name);
 	Object->SetStringField(TEXT("$time"), Event.Timestamp.ToIso8601());
-	Object->SetNumberField(TEXT("$schema"), 1);
+	Object->SetNumberField(TEXT("$schema"), 2);
 	Object->SetStringField(TEXT("$session_id"), Event.SessionID);
 	if (!Settings.DeviceID.IsEmpty())
 	{
@@ -410,7 +468,15 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 		Object->SetStringField(TEXT("$user_id"), Settings.UserID);
 	}
 	const TSharedRef<FJsonObject> Platform = MakeShared<FJsonObject>();
-	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.3.0"));
+	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.4.0"));
+	if (Event.Sequence > 0)
+	{
+		Platform->SetField(TEXT("seq"), MakeShared<FJsonValueNumberString>(LexToString(Event.Sequence)));
+	}
+	if (Event.bKeyframe)
+	{
+		Platform->SetBoolField(TEXT("keyframe"), true);
+	}
 	Platform->SetStringField(TEXT("engine"), TEXT("Unreal ") + Settings.EngineVersion);
 	Platform->SetStringField(TEXT("app_version"), Settings.AppVersion);
 	Platform->SetStringField(TEXT("os"), Settings.OperatingSystem);
@@ -539,6 +605,12 @@ FClient::FClient(FSettings InSettings, FEnvironment Environment, TSharedRef<ITra
 		bRecordingRegistered = IFileManager::Get().DirectoryExists(*Settings.Recording->TelemetryDirectory)
 			&& FFileHelper::SaveStringToFile(TEXT(""), *Path);
 		if (!bRecordingRegistered) Settings.Recording.Reset();
+		if (bRecordingRegistered)
+		{
+			// Registering with a recording starts it from complete state and object keyframes.
+			bStateKeyframeDue = true;
+			bObjectKeyframeDue = true;
+		}
 	}
 
 }
@@ -546,6 +618,16 @@ FClient::FClient(FSettings InSettings, FEnvironment Environment, TSharedRef<ITra
 void FClient::SetContextProvider(FContextProvider Provider)
 {
 	ContextProvider = MoveTemp(Provider);
+}
+
+void FClient::SetStateProvider(FContextProvider Provider)
+{
+	StateProvider = MoveTemp(Provider);
+}
+
+void FClient::ClearState(const FString& Key)
+{
+	DirectState.Remove(Key);
 }
 
 void FClient::SetActivitySource(FActivitySource Source)
@@ -610,54 +692,172 @@ void FClient::FillActivityContext(FProperties& Properties, const FActivitySample
 	}
 	if (Sample.CameraFOV.IsSet())
 	{
-		Properties.Set(TEXT("camera.fov"), Sample.CameraFOV.GetValue()).Set(TEXT("camera.fov_axis"), TEXT("horizontal"));
+		Properties.Set(TEXT("camera.fov"), Sample.CameraFOV.GetValue());
 	}
-	if (Sample.ViewportSize.X > 0 && Sample.ViewportSize.Y > 0)
-	{
-		Properties.Set(TEXT("viewport.width"), Sample.ViewportSize.X).Set(TEXT("viewport.height"), Sample.ViewportSize.Y);
-	}
+}
+
+bool FClient::IsCollecting() const
+{
+	return (State == EState::Ok || State == EState::NetworkDown) && !bShutdown;
 }
 
 bool FClient::Track(const FString& Name, const FProperties& Properties)
 {
 	check(IsInGameThread());
-	if ((State != EState::Ok && State != EState::NetworkDown) || Name.TrimStartAndEnd().IsEmpty() || bShutdown)
+	if (!IsCollecting() || Name.TrimStartAndEnd().IsEmpty())
 	{
 		return false;
 	}
 	if (bRecordingRegistered && !bRecordingClosed
 		&& IFileManager::Get().FileExists(*(Settings.Recording->TelemetryDirectory / TEXT("closed.json")))) FinishRecording();
+	const FDateTime Timestamp = Clock();
+	TOptional<FActivitySample> Sample;
+	if (ActivitySource)
+	{
+		Sample = ActivitySource();
+	}
+	// State changes are queued first, so the state at every event is exact.
+	const bool bStateKeyframeQueued = PollState(Timestamp, Sample.GetPtrOrNull());
 	if (GetPendingEventCount() >= FMath::Max(1, Settings.QueueMaxEvents))
 	{
-		++DroppedEvents;
-		if (!bRecordingClosed && Settings.Recording.IsSet()) ++RecordingDroppedEvents;
+		NoteDropped(1, ActiveRecording().IsSet() ? 1 : 0);
+		// A gameplay event carries no session state. When the keyframe queued for it already holds every
+		// value, the drop needs no further state keyframe, which in a full queue would take the slot from
+		// every later event.
+		if (bStateKeyframeQueued)
+		{
+			bStateKeyframeDue = false;
+		}
 		return false;
 	}
-	FEvent Event{ FGuid::NewGuid(), Name, Clock(), SessionID, {} };
-	if (!bRecordingClosed) Event.Recording = Settings.Recording;
+	FEvent Event{ FGuid::NewGuid(), Name, Timestamp, SessionID, {} };
+	Event.Recording = ActiveRecording();
 	if (ContextProvider)
 	{
 		ContextProvider(Event.Properties);
 	}
-	if (ActivitySource)
+	if (Sample.IsSet())
 	{
-		const FActivitySample Sample = ActivitySource();
-		FillActivityContext(Event.Properties, Sample);
-		Event.ScreenSize = Sample.ViewportSize;
+		FillActivityContext(Event.Properties, Sample.GetValue());
+		Event.ScreenSize = Sample->ViewportSize;
 	}
 	Event.Properties.Merge(Properties);
 	if (EventProcessor)
 	{
 		EventProcessor(Event.Properties);
 	}
-	if (Private::Utf8Length(SerializeEvent(Event, Settings)) > Private::EventByteCap)
+	FProperties Level;
+	for (const auto& Pair : Event.Properties.GetValues())
 	{
-		++DroppedEvents;
-		if (!bRecordingClosed && Settings.Recording.IsSet()) ++RecordingDroppedEvents;
+		if (Pair.Key.StartsWith(TEXT("game_level.")))
+		{
+			Level.Put(Pair.Key, Pair.Value);
+		}
+	}
+	if (!Enqueue(MoveTemp(Event)))
+	{
+		// Enqueue counted the dropped event.
+		if (bStateKeyframeQueued)
+		{
+			bStateKeyframeDue = false;
+		}
 		return false;
 	}
-	Queue.Add(MoveTemp(Event));
+	LevelContext = MoveTemp(Level);
 	return true;
+}
+
+bool FClient::Enqueue(FEvent Record)
+{
+	if (GetPendingEventCount() >= FMath::Max(1, Settings.QueueMaxEvents))
+	{
+		NoteDropped(1, Record.Recording.IsSet() ? 1 : 0);
+		return false;
+	}
+	Record.Sequence = NextSequence;
+	if (Private::Utf8Length(SerializeEvent(Record, Settings)) > Private::EventByteCap)
+	{
+		NoteDropped(1, Record.Recording.IsSet() ? 1 : 0);
+		return false;
+	}
+	++NextSequence;
+	Queue.Add(MoveTemp(Record));
+	return true;
+}
+
+TOptional<FRecordingContext> FClient::ActiveRecording() const
+{
+	return bRecordingClosed ? TOptional<FRecordingContext>() : Settings.Recording;
+}
+
+void FClient::NoteDropped(int32 Count, int32 RecordingCount)
+{
+	RecordingDroppedEvents += RecordingCount;
+	if (Count > 0)
+	{
+		DroppedEvents += Count;
+		// Keyframes let a reader recover from any lost record.
+		bStateKeyframeDue = true;
+		bObjectKeyframeDue = true;
+	}
+}
+
+bool FClient::PollState(FDateTime Timestamp, const FActivitySample* Sample)
+{
+	FProperties Current;
+	if (Sample && Sample->CameraFOV.IsSet())
+	{
+		Current.Set(TEXT("camera.fov_axis"), TEXT("horizontal"));
+	}
+	if (Sample && Sample->ViewportSize.X > 0 && Sample->ViewportSize.Y > 0)
+	{
+		Current.Set(TEXT("viewport.width"), Sample->ViewportSize.X).Set(TEXT("viewport.height"), Sample->ViewportSize.Y);
+	}
+	if (StateProvider)
+	{
+		StateProvider(Current);
+	}
+	Current.Merge(DirectState);
+	const TMap<FString, TSharedPtr<FJsonValue>>& Values = Current.GetValues();
+	const bool bKeyframe = bStateKeyframeDue;
+	FEvent Record{ FGuid::NewGuid(), Private::StateRecordName, Timestamp, SessionID, {} };
+	Record.Recording = ActiveRecording();
+	Record.bKeyframe = bKeyframe;
+	if (bKeyframe)
+	{
+		Record.Properties = Current;
+	}
+	else
+	{
+		for (const auto& Pair : Values)
+		{
+			if (!Private::SameValue(SentState.FindRef(Pair.Key), Pair.Value))
+			{
+				Record.Properties.Put(Pair.Key, Pair.Value);
+			}
+		}
+		for (const auto& Pair : SentState)
+		{
+			if (!Values.Contains(Pair.Key))
+			{
+				Record.Properties.Put(Pair.Key, MakeShared<FJsonValueNull>());
+			}
+		}
+	}
+	// Before anything is sent an empty keyframe has nothing to reset; after that, it clears every value.
+	const bool bSend = !Record.Properties.GetValues().IsEmpty() || (bKeyframe && bStateSent);
+	if (!bSend || !Enqueue(MoveTemp(Record)))
+	{
+		return false;
+	}
+	bStateSent = true;
+	SentState = Values;
+	if (bKeyframe)
+	{
+		bStateKeyframeDue = false;
+		StateKeyframeSeconds = bClockStarted ? CurrentSeconds : -1.0;
+	}
+	return bKeyframe;
 }
 
 void FClient::Tick()
@@ -671,7 +871,12 @@ void FClient::Tick(double NowSeconds)
 	CurrentSeconds = NowSeconds;
 	if (bRecordingRegistered && !bRecordingClosed
 		&& IFileManager::Get().FileExists(*(Settings.Recording->TelemetryDirectory / TEXT("closed.json")))) FinishRecording();
-	if (Settings.bMovementTracking && !bShutdown && ActivitySource && (State == EState::Ok || State == EState::NetworkDown))
+	if (!bClockStarted)
+	{
+		bClockStarted = true;
+		StateKeyframeSeconds = ObjectKeyframeSeconds = NowSeconds;
+	}
+	if (Settings.bMovementTracking && IsCollecting() && ActivitySource)
 	{
 		if (Teleports.IsEmpty())
 		{
@@ -680,6 +885,35 @@ void FClient::Tick(double NowSeconds)
 		else
 		{
 			ResetMovement();
+		}
+	}
+	if (IsCollecting())
+	{
+		if (NowSeconds - StateKeyframeSeconds >= Private::KeyframeSeconds)
+		{
+			bStateKeyframeDue = true;
+		}
+		if (LastStatePollSeconds < 0.0 || NowSeconds - LastStatePollSeconds >= Private::StatePollSeconds)
+		{
+			LastStatePollSeconds = NowSeconds;
+			TOptional<FActivitySample> Sample;
+			if (ActivitySource)
+			{
+				Sample = ActivitySource();
+			}
+			PollState(Clock(), Sample.GetPtrOrNull());
+		}
+		if (NowSeconds - ObjectKeyframeSeconds >= Private::KeyframeSeconds)
+		{
+			bObjectKeyframeDue = true;
+		}
+		if (NowSeconds >= NextObjectCheckSeconds)
+		{
+			const double Interval = 1.0 / FMath::Clamp(FMath::IsFinite(Settings.ObjectChecksPerSecond) ? Settings.ObjectChecksPerSecond : 4.0, 1.0, 10.0);
+			NextObjectCheckSeconds = NextObjectCheckSeconds < 0.0 || NextObjectCheckSeconds + Interval <= NowSeconds
+				? NowSeconds + Interval
+				: NextObjectCheckSeconds + Interval;
+			CheckObjects();
 		}
 	}
 	if (!Queue.IsEmpty() && !bRequestInFlight && NowSeconds >= NextRetrySeconds
@@ -696,6 +930,7 @@ void FClient::FinishRecording()
 	bRecordingClosed = true;
 	FEvent Marker{ FGuid::NewGuid(), TEXT("$tf_telemetry_complete"), Clock(), SessionID, {} };
 	Marker.Recording = Settings.Recording;
+	Marker.Sequence = NextSequence++;
 	// Control records must remain possible even when the gameplay queue is full.
 	Queue.Add(MoveTemp(Marker));
 	bFlushRequested = true;
@@ -716,8 +951,7 @@ void FClient::Flush()
 	int32 Written = 0;
 	int32 RecordingSkipped = 0;
 	const FString Body = BuildBatch(Queue, Settings, Clock(), Consumed, &Written, &RecordingSkipped);
-	RecordingDroppedEvents += RecordingSkipped;
-	DroppedEvents += Consumed - Written;
+	NoteDropped(Consumed - Written, RecordingSkipped);
 	if (Consumed == 0)
 	{
 		return;
@@ -772,8 +1006,7 @@ void FClient::CompleteSend(int32 ResponseCode, bool bSucceeded)
 		State = EState::Ok;
 		RetryDelaySeconds = 1.0;
 		NextRetrySeconds = 0.0;
-		DroppedEvents += InFlight.Num();
-		RecordingDroppedEvents += Private::RecordingEventCount(InFlight);
+		NoteDropped(InFlight.Num(), Private::RecordingEventCount(InFlight));
 		InFlight.Reset();
 		bFlushRequested = !Queue.IsEmpty();
 	}
@@ -791,6 +1024,35 @@ void FClient::Shutdown(double TimeoutSeconds)
 {
 	FTSTicker::RemoveTicker(TickerHandle);
 	TickerHandle.Reset();
+	if (IsCollecting())
+	{
+		// Send state changes since the last poll, then registrations, removals and object state
+		// changes that are waiting for the next check.
+		TOptional<FActivitySample> Sample;
+		if (ActivitySource)
+		{
+			Sample = ActivitySource();
+		}
+		PollState(Clock(), Sample.GetPtrOrNull());
+		// A check ends one lifetime of an ID, so lifetimes waiting behind it need more checks. Stop
+		// when nothing waits or the queue refuses the next removal.
+		const int32 MaxChecks = PendingRemovals.Num() + 2;
+		for (int32 Check = 0; Check < MaxChecks; ++Check)
+		{
+			const int32 Waiting = PendingRemovals.Num();
+			if (!CheckObjects() || (Waiting > 0 && PendingRemovals.Num() >= Waiting))
+			{
+				break;
+			}
+		}
+		if (!PendingRemovals.IsEmpty())
+		{
+			// Removals that never reach the queue are counted, so the completion marker reports them.
+			const int32 Abandoned = PendingRemovals.Num();
+			PendingRemovals.Reset();
+			NoteDropped(Abandoned, ActiveRecording().IsSet() ? Abandoned : 0);
+		}
+	}
 	bShutdown = true;
 	FinishRecording();
 	Flush();
@@ -930,6 +1192,347 @@ void FClient::RecordTeleport(const FVector& StartCentimeters, const FVector& End
 {
 	Track(TEXT("player_teleported"), FProperties().Set(TEXT("teleport.kind"), TEXT("teleport")).SetIfPresent(TEXT("teleport.reason"), Reason).SetVector(TEXT("teleport.start.position"), StartCentimeters).SetVector(TEXT("teleport.end.position"), EndCentimeters).Set(TEXT("teleport.duration"), FMath::Max(0.0, DurationSeconds)).Set(TEXT("teleport.distance"), FVector::Distance(StartCentimeters, EndCentimeters) / 100.0));
 	ResetMovement();
+}
+
+uint64 FClient::TrackObject(const FString& Kind, FPositionSource PositionCentimeters, const FString& ID)
+{
+	check(IsInGameThread());
+	if (!IsCollecting() || !PositionCentimeters)
+	{
+		return 0;
+	}
+	FString ObjectKind = Kind.TrimStartAndEnd();
+	if (ObjectKind.IsEmpty())
+	{
+		ObjectKind = TEXT("object");
+	}
+	FString ObjectID = ID.TrimStartAndEnd();
+	if (ObjectID.IsEmpty())
+	{
+		// Generated IDs skip IDs that a live object or a waiting removal uses, such as an explicit
+		// `crate#1`, so two unrelated objects never share one path.
+		int32& Counter = ObjectCounters.FindOrAdd(ObjectKind);
+		do
+		{
+			ObjectID = FString::Printf(TEXT("%s#%d"), *ObjectKind, ++Counter);
+		} while (ObjectTokens.Contains(ObjectID) || HasPendingRemoval(ObjectID));
+	}
+	if (const uint64* Existing = ObjectTokens.Find(ObjectID))
+	{
+		// Registering a live ID again replaces that object; its path continues.
+		Objects.Remove(*Existing);
+	}
+	else if (Objects.Num() >= FMath::Max(0, Settings.MaxTrackedObjects))
+	{
+		if (!bWarnedObjectLimit)
+		{
+			bWarnedObjectLimit = true;
+			UE_LOG(LogTestingFloor, Warning, TEXT("Testing Floor ignores new tracked objects: %d objects are already live."), Objects.Num());
+		}
+		return 0;
+	}
+	FTrackedObject Object{ ObjectID, ObjectKind, MoveTemp(PositionCentimeters) };
+	Object.LastKnown = Private::FinitePosition(Object.Position());
+	const uint64 Token = NextObjectToken++;
+	ObjectTokens.Add(ObjectID, Token);
+	Objects.Add(Token, MoveTemp(Object));
+	return Token;
+}
+
+void FClient::SetObjectState(uint64 Token, const FString& Key, const FString& Value)
+{
+	SetObjectStateValue(Token, Key, FProperties().Set(Key, Value));
+}
+
+void FClient::SetObjectState(uint64 Token, const FString& Key, const TCHAR* Value)
+{
+	SetObjectStateValue(Token, Key, FProperties().Set(Key, Value));
+}
+
+void FClient::SetObjectState(uint64 Token, const FString& Key, int32 Value)
+{
+	SetObjectStateValue(Token, Key, FProperties().Set(Key, Value));
+}
+
+void FClient::SetObjectState(uint64 Token, const FString& Key, int64 Value)
+{
+	SetObjectStateValue(Token, Key, FProperties().Set(Key, Value));
+}
+
+void FClient::SetObjectState(uint64 Token, const FString& Key, float Value)
+{
+	SetObjectStateValue(Token, Key, FProperties().Set(Key, Value));
+}
+
+void FClient::SetObjectState(uint64 Token, const FString& Key, double Value)
+{
+	SetObjectStateValue(Token, Key, FProperties().Set(Key, Value));
+}
+
+void FClient::SetObjectState(uint64 Token, const FString& Key, bool bValue)
+{
+	SetObjectStateValue(Token, Key, FProperties().Set(Key, bValue));
+}
+
+void FClient::SetObjectStateValue(uint64 Token, const FString& Key, const FProperties& Value)
+{
+	FTrackedObject* Object = Objects.Find(Token);
+	const TSharedPtr<FJsonValue> Scalar = Value.GetValues().FindRef(Key);
+	if (!Object || !Scalar.IsValid() || Private::SameValue(Object->State.FindRef(Key), Scalar))
+	{
+		return;
+	}
+	Object->State.Add(Key, Scalar);
+	Object->ChangedState.AddUnique(Key);
+}
+
+void FClient::RemoveObject(uint64 Token, const FString& Reason)
+{
+	FTrackedObject Object;
+	if (!Objects.RemoveAndCopyValue(Token, Object))
+	{
+		return;
+	}
+	ObjectTokens.Remove(Object.ID);
+	const TOptional<FVector> Final = Private::FinitePosition(Object.Position());
+	FObjectRows Rows{ Object.ID, Object.Kind };
+	if (!Object.LastSent.IsSet() && Object.LastKnown.IsSet())
+	{
+		// Never checked: a short-lived object still gets a start and an end.
+		Rows.Samples.Add(Object.LastKnown.GetValue());
+	}
+	if (Final.IsSet())
+	{
+		Rows.Samples.Add(Final.GetValue());
+	}
+	else if (Object.LastSent.IsSet() && Object.LastKnown.IsSet())
+	{
+		Rows.Samples.Add(Object.LastKnown.GetValue());
+	}
+	if (Rows.Samples.IsEmpty())
+	{
+		// An object that never had a position never appeared.
+		return;
+	}
+	for (const FString& Key : Object.ChangedState)
+	{
+		Rows.State.Emplace(Key, Object.State.FindRef(Key));
+	}
+	Rows.RemovedReason = Reason.TrimStartAndEnd().IsEmpty() ? FString(TEXT("removed")) : Reason.TrimStartAndEnd();
+	PendingRemovals.Add(MoveTemp(Rows));
+	TrimPendingRemovals();
+}
+
+bool FClient::HasPendingRemoval(const FString& ID) const
+{
+	return PendingRemovals.ContainsByPredicate([&ID](const FObjectRows& Rows) { return Rows.ID == ID; });
+}
+
+void FClient::TrimPendingRemovals()
+{
+	// Readers end a path only on its removal, so refused removals are retried, but no more of them
+	// than live objects. The newest overflow is dropped, counted, and followed by a keyframe.
+	const int32 Excess = PendingRemovals.Num() - FMath::Max(1, Settings.MaxTrackedObjects);
+	if (Excess > 0)
+	{
+		PendingRemovals.RemoveAt(PendingRemovals.Num() - Excess, Excess);
+		NoteDropped(Excess, ActiveRecording().IsSet() ? Excess : 0);
+	}
+}
+
+int32 FClient::GetTrackedObjectCount() const
+{
+	return Objects.Num();
+}
+
+bool FClient::CheckObjects()
+{
+	const bool bKeyframe = bObjectKeyframeDue && !Objects.IsEmpty();
+	if (bObjectKeyframeDue)
+	{
+		bObjectKeyframeDue = false;
+		ObjectKeyframeSeconds = CurrentSeconds;
+	}
+	TArray<uint64> Tokens;
+	Objects.GetKeys(Tokens);
+	Tokens.Sort();
+	if (!RefusedObjectIDs.IsEmpty())
+	{
+		// Recovery keyframes that need more records than the queue holds would otherwise repeat the
+		// same first objects; the objects refused last time go first instead.
+		TArray<uint64> Refused;
+		TArray<uint64> Rest;
+		for (const uint64 Token : Tokens)
+		{
+			(RefusedObjectIDs.Contains(Objects[Token].ID) ? Refused : Rest).Add(Token);
+		}
+		Refused.Append(Rest);
+		Tokens = MoveTemp(Refused);
+		RefusedObjectIDs.Reset();
+	}
+	bool bDeferred = false;
+	TArray<FObjectRows> Rows;
+	// Readers apply a record's samples before its removals, so a check ends at most one lifetime of an
+	// ID. A later lifetime's removal waits for the next check, after the earlier path has ended.
+	TSet<FString> EndedIDs;
+	const auto TakeRemovals = [this, &Rows, &EndedIDs] {
+		TArray<FObjectRows> Carried;
+		for (FObjectRows& Removal : PendingRemovals)
+		{
+			if (EndedIDs.Contains(Removal.ID))
+			{
+				Carried.Add(MoveTemp(Removal));
+				continue;
+			}
+			EndedIDs.Add(Removal.ID);
+			Rows.Add(MoveTemp(Removal));
+		}
+		PendingRemovals = MoveTemp(Carried);
+	};
+	TakeRemovals();
+	for (const uint64 Token : Tokens)
+	{
+		FTrackedObject& Object = Objects[Token];
+		if (HasPendingRemoval(Object.ID) || EndedIDs.Contains(Object.ID))
+		{
+			// A reused ID waits until the old path's removal is queued, so a reader ends the old path first.
+			bDeferred = true;
+			continue;
+		}
+		const TOptional<FVector> Reading = Object.Position();
+		if (Reading.IsSet() && Reading->ContainsNaN())
+		{
+			// A NaN or infinite axis cannot be written as JSON: skip this check without ending the object.
+			continue;
+		}
+		const TOptional<FVector> Position = Reading;
+		if (!Position.IsSet())
+		{
+			RemoveObject(Token, TEXT("gone"));
+			continue;
+		}
+		FObjectRows Changes{ Object.ID, Object.Kind };
+		if (!Object.LastSent.IsSet() && Object.LastKnown.IsSet())
+		{
+			// The first sample is where the object was registered.
+			Changes.Samples.Add(Object.LastKnown.GetValue());
+			Object.LastSent = Object.LastKnown;
+		}
+		if (!Object.LastSent.IsSet() || (bKeyframe && Changes.Samples.IsEmpty())
+			|| FVector::Distance(Position.GetValue(), Object.LastSent.GetValue()) >= Private::ObjectMinMoveCentimeters)
+		{
+			Changes.Samples.Add(Position.GetValue());
+			Object.LastSent = Position;
+		}
+		Object.LastKnown = Position;
+		if (bKeyframe)
+		{
+			for (const auto& Pair : Object.State)
+			{
+				Changes.State.Emplace(Pair.Key, Pair.Value);
+			}
+		}
+		else
+		{
+			for (const FString& Key : Object.ChangedState)
+			{
+				Changes.State.Emplace(Key, Object.State.FindRef(Key));
+			}
+		}
+		Object.ChangedState.Reset();
+		if (!Changes.Samples.IsEmpty() || !Changes.State.IsEmpty())
+		{
+			Rows.Add(MoveTemp(Changes));
+		}
+	}
+	TakeRemovals();
+	QueueObjectRecords(Rows, bKeyframe);
+	return bDeferred || !PendingRemovals.IsEmpty();
+}
+
+void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
+{
+	const FDateTime Timestamp = Clock();
+	TArray<FObjectRows> Refused;
+	for (int32 Start = 0, End = 0; Start < Rows.Num(); Start = End)
+	{
+		// Keep each object's rows together so its state never arrives before its first sample.
+		int32 Samples = 0;
+		int32 Bytes = 0;
+		for (End = Start; End < Rows.Num(); ++End)
+		{
+			const FObjectRows& Row = Rows[End];
+			const int32 RowSamples = Row.Samples.Num();
+			const int32 RowBytes = Private::EstimateBytes(Row.ID, Row.Kind, RowSamples, Row.State, Row.RemovedReason);
+			if (End > Start && (Samples + RowSamples > Private::ObjectRecordMaxSamples || Bytes + RowBytes > Private::ObjectRecordByteBudget))
+			{
+				break;
+			}
+			Samples += RowSamples;
+			Bytes += RowBytes;
+		}
+		TArray<TSharedPtr<FJsonValue>> SampleIDs, Kinds, X, Y, Z, RemovedIDs, Reasons, StateIDs, StateKeys, StateValues;
+		for (int32 Index = Start; Index < End; ++Index)
+		{
+			const FObjectRows& Row = Rows[Index];
+			for (const FVector& Sample : Row.Samples)
+			{
+				SampleIDs.Add(MakeShared<FJsonValueString>(Row.ID));
+				Kinds.Add(MakeShared<FJsonValueString>(Row.Kind));
+				X.Add(Private::Centimeters(Sample.X));
+				Y.Add(Private::Centimeters(Sample.Y));
+				Z.Add(Private::Centimeters(Sample.Z));
+			}
+			for (const auto& Pair : Row.State)
+			{
+				StateIDs.Add(MakeShared<FJsonValueString>(Row.ID));
+				StateKeys.Add(MakeShared<FJsonValueString>(Pair.Key));
+				StateValues.Add(Pair.Value);
+			}
+			if (!Row.RemovedReason.IsEmpty())
+			{
+				RemovedIDs.Add(MakeShared<FJsonValueString>(Row.ID));
+				Reasons.Add(MakeShared<FJsonValueString>(Row.RemovedReason));
+			}
+		}
+		FEvent Record{ FGuid::NewGuid(), Private::ObjectsRecordName, Timestamp, SessionID, LevelContext };
+		Record.Recording = ActiveRecording();
+		Record.bKeyframe = bKeyframe;
+		const auto PutArray = [&Record](const TCHAR* Key, TArray<TSharedPtr<FJsonValue>>& Values) {
+			if (!Values.IsEmpty())
+			{
+				Record.Properties.Put(Key, MakeShared<FJsonValueArray>(MoveTemp(Values)));
+			}
+		};
+		PutArray(TEXT("sample.id"), SampleIDs);
+		PutArray(TEXT("sample.kind"), Kinds);
+		PutArray(TEXT("sample.x"), X);
+		PutArray(TEXT("sample.y"), Y);
+		PutArray(TEXT("sample.z"), Z);
+		PutArray(TEXT("removed.id"), RemovedIDs);
+		PutArray(TEXT("removed.reason"), Reasons);
+		PutArray(TEXT("state.id"), StateIDs);
+		PutArray(TEXT("state.key"), StateKeys);
+		PutArray(TEXT("state.value"), StateValues);
+		if (!Enqueue(MoveTemp(Record)))
+		{
+			// The keyframe that follows a drop repeats live objects, but not removals.
+			for (int32 Index = Start; Index < End; ++Index)
+			{
+				if (!Rows[Index].RemovedReason.IsEmpty())
+				{
+					Refused.Add(Rows[Index]);
+				}
+				else
+				{
+					RefusedObjectIDs.Add(Rows[Index].ID);
+				}
+			}
+		}
+	}
+	// Refused removals are earlier lifetimes than any carried to the next check, so they go first.
+	PendingRemovals.Insert(MoveTemp(Refused), 0);
+	TrimPendingRemovals();
 }
 
 EState FClient::GetState() const

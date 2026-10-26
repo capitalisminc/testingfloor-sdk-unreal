@@ -79,7 +79,8 @@ empty or whitespace-only strings. `SetVector` flattens vectors into `.x`, `.y`,
 and `.z` properties. Nested objects are not supported. Keys beginning with `$`
 are reserved.
 
-Add shared game state to every event:
+Add small values that describe each moment, such as level, health and game
+clock, to every event:
 
 ```cpp
 Client->SetContextProvider([](TestingFloor::FProperties& Context) {
@@ -91,6 +92,69 @@ Keep providers inexpensive: they run synchronously when events are captured.
 Event properties override shared context. Captured values, timestamps, and IDs
 remain stable across retries. `SetEventProcessor` can finalize the merged
 snapshot before queueing, for example to convert a game's coordinate frame.
+Keep values that row-level queries filter by, such as `game_level.id` and the
+game clock, in the context provider.
+
+## Session State
+
+Values that stay true until they change, such as settings, device, build,
+inventory and outfit, belong in a state provider instead:
+
+```cpp
+Client->SetStateProvider([](TestingFloor::FProperties& State) {
+    State.Set(TEXT("pref.vsync"), true).Set(TEXT("player.outfit.id"), TEXT("example-outfit"));
+});
+Client->SetState(TEXT("difficulty"), TEXT("hard")); // Or set one value directly.
+Client->ClearState(TEXT("difficulty"));
+```
+
+The SDK reads state before each event and once a second, including while
+gameplay is paused. When a value changes, it queues a `$tf_state` record with
+only the changed keys before the event, so the state at every event is exact. A
+key that is no longer supplied is sent as `null`. `SetState` values override the
+provider's value for the same key and accept the same types as `FProperties`.
+
+A keyframe repeats every current value. The SDK sends one at the start of the
+play session (which is also the start of its recording), every 5 minutes, and
+after it drops any record. The SDK's own `viewport.width`, `viewport.height` and
+`camera.fov_axis` are state. Testing Floor shows each event with the state that
+was current at that moment. A game without a state provider keeps all of its
+context on every event.
+
+## Tracked Objects
+
+Register NPCs, props, vehicles and projectiles to draw their paths on the map:
+
+```cpp
+const TWeakObjectPtr<AActor> Weak = Guard;
+const uint64 Token = Client->TrackObject(TEXT("guard"), [Weak]() -> TOptional<FVector> {
+    return Weak.IsValid() ? TOptional<FVector>(Weak->GetActorLocation()) : TOptional<FVector>();
+}, TEXT("captain_example"));
+Client->SetObjectState(Token, TEXT("behavior"), TEXT("searching"));
+Client->RemoveObject(Token, TEXT("destroyed"));
+```
+
+Pass a stable ID when your events refer to the object; otherwise the SDK assigns
+`kind#n`, counting per kind for each play session. Hold engine objects through
+weak pointers. A position source that returns unset removes the object with
+reason `gone`. Pass `destroyed` when the engine object is destroyed and
+`disabled` when tracking is turned off; any other reason string is passed
+through. Registering a live ID again replaces that object.
+
+The SDK checks live objects 4 times a second in unscaled time
+(`FSettings::ObjectChecksPerSecond`, 1–10). It sends a sample when an object is
+registered and afterwards only when the object has moved at least 0.25 m
+(25 cm). Removal sends the final position and the reason. Object state values
+are scalars, and only changed values are sent. Every 5 minutes, and after a drop,
+a keyframe repeats every live object with its position and state.
+
+Samples, state changes and removals from one check are batched into
+`$tf_objects` records of parallel arrays, with positions in native centimeters
+rounded to 1 cm and at most 300 samples per record. Records copy the
+`game_level.*` values of the most recent event. `FSettings::MaxTrackedObjects`
+(default 256) limits live objects; further registrations return 0 and log one
+warning. With collection disabled, `TrackObject` returns 0 and nothing is
+sampled. Handles of 0 or removed objects do nothing.
 
 ## Player & Camera Context
 
@@ -110,10 +174,10 @@ Client->SetActivitySource([] {
 
 Replace the example values with current game state; leave optional samples unset
 when unavailable. Every event carries the available `player.position.*`,
-`camera.position.*`, `camera.euler.*`, `camera.forward.*`, `camera.fov`, and
-`viewport.width` / `viewport.height` fields. FOV is horizontal, with
-`camera.fov_axis=horizontal`. `CameraEulerDegrees` can override quaternion-derived
-Euler values.
+`camera.position.*`, `camera.euler.*`, `camera.forward.*`, and `camera.fov`
+fields. FOV is horizontal: `camera.fov_axis=horizontal` and `viewport.width` /
+`viewport.height` are session state. `CameraEulerDegrees` can override
+quaternion-derived Euler values.
 
 Positions and teleport endpoints use native Unreal centimeters. Movement
 thresholds and scalar movement/teleport distances use meters; angles use degrees.
@@ -195,7 +259,8 @@ nor recorder process control.
 - Batches default to 50 events or a 0.25-second flush interval, with one request
   in flight. `Flush()` requests an immediate send when backoff permits.
 - Events over 32 KiB are rejected, batches stay below 1 MiB, and the default queue
-  holds 4,096 events including requests in flight. A full queue drops new events.
+  holds 4,096 records including requests in flight. A full queue drops new records.
+  `$tf_state` and `$tf_objects` records share the queue and the counters.
 - Network errors, HTTP 408/429, and server errors retry with backoff. HTTP 401/403
   disable the session; other invalid client requests are dropped.
 - `Shutdown` is best effort and clamps its wait to five seconds. There is no disk

@@ -131,7 +131,7 @@ bool FTestingFloorPayloadTest::RunTest(const FString& Parameters)
 	const TSharedPtr<FJsonObject> Payload = Events[0];
 	TestEqual(TEXT("Event name cannot be overwritten by properties"), Payload->GetStringField(TEXT("$name")), FString(TEXT("player_weapon_fire")));
 	TestEqual(TEXT("Timestamp captured at enqueue"), Payload->GetStringField(TEXT("$time")), Timestamp.ToIso8601());
-	TestEqual(TEXT("Schema matches collector"), Payload->GetIntegerField(TEXT("$schema")), 1);
+	TestEqual(TEXT("Schema matches collector"), Payload->GetIntegerField(TEXT("$schema")), 2);
 	TestEqual(TEXT("Event overrides context, then owns snapshot"), Payload->GetStringField(TEXT("weapon.id")), FString(TEXT("plasma_rifle")));
 	TestEqual(TEXT("Context is captured before later edits"), Payload->GetStringField(TEXT("captured")), FString(TEXT("before")));
 	TestTrue(TEXT("Boolean remains boolean"), Payload->GetBoolField(TEXT("hit")));
@@ -139,7 +139,7 @@ bool FTestingFloorPayloadTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("64-bit integer keeps exact wire precision"), Transport->Bodies[0].Contains(TEXT("9007199254740993")));
 	const TSharedPtr<FJsonObject>* Metadata = nullptr;
 	TF_REQUIRE_TRUE(Payload->TryGetObjectField(TEXT("$tf"), Metadata) && Metadata && Metadata->IsValid(), "SDK metadata object");
-	TestEqual(TEXT("SDK metadata"), (*Metadata)->GetStringField(TEXT("sdk_version")), FString(TEXT("0.3.0")));
+	TestEqual(TEXT("SDK metadata"), (*Metadata)->GetStringField(TEXT("sdk_version")), FString(TEXT("0.4.0")));
 	return true;
 }
 

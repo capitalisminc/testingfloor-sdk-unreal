@@ -6,6 +6,8 @@
 
 namespace TestingFloor
 {
+class FClient;
+
 /** Typed, flattened properties. Call-site values override context with the same key. */
 class TESTINGFLOORSDK_API FProperties
 {
@@ -29,6 +31,8 @@ public:
 	const TMap<FString, TSharedPtr<FJsonValue>>& GetValues() const;
 
 private:
+	/** The client also writes the null values and number arrays that schema 2 records need. */
+	friend class FClient;
 	void Put(const FString& Key, TSharedPtr<FJsonValue> Value);
 	TMap<FString, TSharedPtr<FJsonValue>> Properties;
 };
@@ -67,6 +71,10 @@ struct FSettings
 	double FlushIntervalSeconds = 0.25;
 	int32 QueueMaxEvents = 4096;
 	bool bMovementTracking = false;
+	/** Tracked-object checks per second of unscaled time, clamped to 1-10. */
+	double ObjectChecksPerSecond = 4.0;
+	/** Live tracked objects. Further registrations are ignored, with one warning. */
+	int32 MaxTrackedObjects = 256;
 };
 
 struct FEnvironment
@@ -93,6 +101,9 @@ struct FEvent
 	FProperties Properties;
 	FIntPoint ScreenSize = FIntPoint::ZeroValue;
 	TOptional<FRecordingContext> Recording;
+	/** Play-session record counter (`$tf.seq`), assigned when the record is queued. Zero omits it. */
+	int64 Sequence = 0;
+	bool bKeyframe = false;
 };
 
 /** Sources supply native Unreal centimeters and degrees. Movement metrics/thresholds remain meters. */
@@ -146,6 +157,8 @@ public:
 	using FContextProvider = TFunction<void(FProperties&)>;
 	using FActivitySource = TFunction<FActivitySample()>;
 	using FClock = TFunction<FDateTime()>;
+	/** Returns native centimeters, or unset once the object is gone. */
+	using FPositionSource = TFunction<TOptional<FVector>()>;
 
 	/** Create an automatically ticked client using the engine environment and HTTP transport. */
 	static TSharedRef<FClient> Create(FSettings Settings);
@@ -154,7 +167,17 @@ public:
 	FClient& operator=(const FClient&) = delete;
 	/** Advanced creation seam for custom transports and deterministic clocks. */
 	static TSharedRef<FClient> Create(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock = [] { return FDateTime::UtcNow(); });
+	/** Small values that describe each moment, such as level, health and game clock. Added to every event. */
 	void SetContextProvider(FContextProvider Provider);
+	/** Values that stay true until they change. Sent as `$tf_state` changes and keyframes, not on every event. */
+	void SetStateProvider(FContextProvider Provider);
+	/** Set one state value directly. Accepts the types FProperties::Set accepts and overrides the state provider. */
+	template <typename T> void SetState(const FString& Key, T&& Value)
+	{
+		DirectState.Set(Key, Forward<T>(Value));
+	}
+	/** Remove a value set with SetState. A key that no source supplies any more is sent as null. */
+	void ClearState(const FString& Key);
 	void SetActivitySource(FActivitySource Source);
 	/** Finalize captured event fields after context/activity/call-site merging, before queueing. */
 	void SetEventProcessor(FContextProvider Processor);
@@ -172,6 +195,24 @@ public:
 	void CancelTeleport(uint64 Token);
 	void RecordTeleport(const FVector& StartCentimeters, const FVector& EndCentimeters, const FString& Reason, double DurationSeconds = 0.0);
 	void ResetMovement();
+	/**
+	 * Track a world object's path in `$tf_objects` records. Without an ID the SDK assigns `kind#n`.
+	 * Returns 0, a handle that does nothing, when collection is off or the live-object limit is reached.
+	 * A position source that returns unset removes the object with reason `gone`.
+	 */
+	uint64 TrackObject(const FString& Kind, FPositionSource PositionCentimeters, const FString& ID = {});
+	void SetObjectState(uint64 Token, const FString& Key, const FString& Value);
+	void SetObjectState(uint64 Token, const FString& Key, const TCHAR* Value);
+	void SetObjectState(uint64 Token, const FString& Key, int32 Value);
+	void SetObjectState(uint64 Token, const FString& Key, int64 Value);
+	void SetObjectState(uint64 Token, const FString& Key, float Value);
+	void SetObjectState(uint64 Token, const FString& Key, double Value);
+	void SetObjectState(uint64 Token, const FString& Key, bool bValue);
+	/** Object state values are scalars. Convert other values at the call site. */
+	template <typename T> void SetObjectState(uint64 Token, const FString& Key, T Value) = delete;
+	/** Send the object's final position and a reason, such as `destroyed` or `disabled`. */
+	void RemoveObject(uint64 Token, const FString& Reason);
+	int32 GetTrackedObjectCount() const;
 	EState GetState() const;
 	const FString& GetPlaySessionID() const;
 	const FString& GetDeviceID() const;
@@ -190,12 +231,27 @@ private:
 	void SampleMovement(double NowSeconds, const FActivitySample& Sample);
 	void EmitMovement(const TCHAR* Reason, double Distance, double Duration, double Rotation, double FOV, double CameraDistance);
 	void FillActivityContext(FProperties& Properties, const FActivitySample& Sample) const;
+	bool IsCollecting() const;
+	bool Enqueue(FEvent Record);
+	/** RecordingCount of the dropped records were attached to the recording; they count toward `dropped_events`. */
+	void NoteDropped(int32 Count, int32 RecordingCount = 0);
+	TOptional<FRecordingContext> ActiveRecording() const;
+	/** Returns whether a state keyframe was queued. */
+	bool PollState(FDateTime Timestamp, const FActivitySample* Sample);
+	void SetObjectStateValue(uint64 Token, const FString& Key, const FProperties& Value);
+	/** Returns whether work waits for a later check: a carried removal or an object held behind one. */
+	bool CheckObjects();
+	bool HasPendingRemoval(const FString& ID) const;
+	void TrimPendingRemovals();
+	struct FObjectRows;
+	void QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe);
 
 	FTSTicker::FDelegateHandle TickerHandle;
 	FSettings Settings;
 	TSharedRef<ITransport> Transport;
 	FClock Clock;
 	FContextProvider ContextProvider;
+	FContextProvider StateProvider;
 	FActivitySource ActivitySource;
 	FContextProvider EventProcessor;
 	FMovementSettings MovementSettings;
@@ -212,6 +268,48 @@ private:
 	bool bRequestInFlight = false;
 	bool bShutdown = false;
 	bool bFlushRequested = false;
+	bool bClockStarted = false;
+	int64 NextSequence = 1;
+	/** `game_level.*` from the most recent event, copied onto `$tf_objects` records. */
+	FProperties LevelContext;
+
+	FProperties DirectState;
+	TMap<FString, TSharedPtr<FJsonValue>> SentState;
+	bool bStateSent = false;
+	bool bStateKeyframeDue = true;
+	double StateKeyframeSeconds = -1.0;
+	double LastStatePollSeconds = -1.0;
+
+	struct FTrackedObject
+	{
+		FString ID;
+		FString Kind;
+		FPositionSource Position;
+		/** The position read at registration until the first check, then the latest checked position. */
+		TOptional<FVector> LastKnown;
+		TOptional<FVector> LastSent;
+		TMap<FString, TSharedPtr<FJsonValue>> State;
+		TArray<FString> ChangedState;
+	};
+	struct FObjectRows
+	{
+		FString ID;
+		FString Kind;
+		TArray<FVector> Samples;
+		TArray<TPair<FString, TSharedPtr<FJsonValue>>> State;
+		FString RemovedReason;
+	};
+	TMap<uint64, FTrackedObject> Objects;
+	TMap<FString, uint64> ObjectTokens;
+	TMap<FString, int32> ObjectCounters;
+	TArray<FObjectRows> PendingRemovals;
+	/** Objects whose rows a full queue refused; the next check sends them first. */
+	TSet<FString> RefusedObjectIDs;
+	uint64 NextObjectToken = 1;
+	double NextObjectCheckSeconds = -1.0;
+	bool bObjectKeyframeDue = false;
+	double ObjectKeyframeSeconds = -1.0;
+	bool bWarnedObjectLimit = false;
 
 	TOptional<FActivitySample> LastSample;
 	bool bMoving = false;
