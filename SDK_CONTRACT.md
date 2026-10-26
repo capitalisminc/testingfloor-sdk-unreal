@@ -150,3 +150,9 @@ Every record is sent with `$schema: 2` and `$tf.seq`: a counter that starts at 1
 - A record holds parallel arrays: `sample.id`, `sample.kind`, `sample.x`, `sample.y`, `sample.z`; `removed.id`, `removed.reason`; `state.id`, `state.key`, `state.value`. Positions use native units, rounded to 1 cm. A record holds at most 300 samples; a larger check is split into several records with the same `$time`. Records copy the `game_level.*` values from the most recent event and carry no other context and no player or camera fields. The SDK sends no record when nothing changed.
 - At most 256 objects are live (setting). Further registrations are ignored, with one warning.
 - With collection disabled, registration returns a handle that does nothing, and nothing is sampled.
+
+### With recording delivery completion
+
+- `$tf_telemetry_complete` is a record too. It takes the next `$tf.seq`.
+- Dropped `$tf_state` and `$tf_objects` records count toward `dropped_events`, and the SDK sends a keyframe after any drop.
+- After a recording closes, `$tf_state` and `$tf_objects` records stop carrying its recording UUID, the same as events. When a Play run registers with a new recording, the SDK sends a keyframe of session state and live objects.

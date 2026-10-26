@@ -7,6 +7,9 @@
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "HAL/FileManager.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 
 namespace TestingFloorSchemaTests
 {
@@ -74,6 +77,11 @@ int64 Seq(const TSharedPtr<FJsonObject>& Record)
 	return Value;
 }
 
+bool HasRecording(const TSharedPtr<FJsonObject>& Record)
+{
+	return Record->GetObjectField(TEXT("$tf"))->HasField(TEXT("recording_uuid"));
+}
+
 bool IsKeyframe(const TSharedPtr<FJsonObject>& Record)
 {
 	bool bValue = false;
@@ -133,7 +141,7 @@ bool FTestingFloorSequenceTest::RunTest(const FString& Parameters)
 	const TArray<TSharedPtr<FJsonValue>>& FirstEvents = First->GetArrayField(TEXT("events"));
 	TF_REQUIRE_TRUE(FirstEvents.Num() == 2, "Both events sent");
 	TestEqual(TEXT("Every record is schema 2"), FirstEvents[0]->AsObject()->GetIntegerField(TEXT("$schema")), 2);
-	TestEqual(TEXT("SDK version"), FirstEvents[0]->AsObject()->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("sdk_version")), FString(TEXT("0.3.0")));
+	TestEqual(TEXT("SDK version"), FirstEvents[0]->AsObject()->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("sdk_version")), FString(TEXT("0.4.0")));
 	TestEqual(TEXT("Seq starts at 1 for the play session"), Seq(FirstEvents[0]->AsObject()), 1LL);
 	TestEqual(TEXT("Seq increases by one per queued record"), Seq(FirstEvents[1]->AsObject()), 2LL);
 	TestFalse(TEXT("Events are not keyframes"), IsKeyframe(FirstEvents[0]->AsObject()));
@@ -458,6 +466,73 @@ bool FTestingFloorObjectLimitsTest::RunTest(const FString& Parameters)
 	Disabled->Tick(1.0);
 	TestFalse(TEXT("Disabled collection samples nothing"), bSampled);
 	TestEqual(TEXT("Disabled collection queues nothing"), Disabled->GetPendingEventCount(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorCompletionRecordsTest, "TestingFloor.Sdk.Schema2.RecordingCompletion", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorCompletionRecordsTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	IFileManager::Get().MakeDirectory(*Directory, true);
+	auto ClientSettings = Settings();
+	TestingFloor::FRecordingContext Recording;
+	Recording.RecordingUUID = TEXT("example-recording");
+	Recording.TelemetryDirectory = Directory;
+	ClientSettings.Recording = Recording;
+	ClientSettings.QueueMaxEvents = 3;
+	const auto Transport = MakeShared<FTransport>();
+	const auto Client = Create(ClientSettings, Transport);
+	int32 Volume = 1;
+	Client->SetStateProvider([&Volume](TestingFloor::FProperties& State) { State.Set(TEXT("pref.volume"), Volume); });
+	FVector Crate = FVector::ZeroVector;
+	Client->TrackObject(TEXT("crate"), [&Crate] { return TOptional<FVector>(Crate); }, TEXT("crate"));
+	Client->Tick(0.0);
+	auto States = Records(*Client, TEXT("$tf_state"));
+	auto Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(States.Num() == 1 && Objects.Num() == 1, "Registration sends state and objects");
+	TestTrue(TEXT("Registration starts a state keyframe"), IsKeyframe(States[0]));
+	TestTrue(TEXT("Registration starts an object keyframe"), IsKeyframe(Objects[0]));
+	TestTrue(TEXT("State carries the recording"), HasRecording(States[0]));
+	TestTrue(TEXT("Objects carry the recording"), HasRecording(Objects[0]));
+
+	Client->Track(TEXT("level_loaded"));
+	Volume = 2;
+	Client->Tick(1.0);
+	TestEqual(TEXT("A full queue drops the state change and the object keyframe it triggers"), Client->GetDroppedEventCount(), 2);
+	Client->Flush();
+	TF_REQUIRE_TRUE(Transport->Complete(200), "Queue drained");
+	Client->Tick(2.0);
+	States = Records(*Client, TEXT("$tf_state"));
+	Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(States.Num() == 1 && Objects.Num() == 1, "Recovery records after the drops");
+	TestTrue(TEXT("State keyframe after a drop"), IsKeyframe(States[0]));
+	TestTrue(TEXT("Object keyframe after a drop"), IsKeyframe(Objects[0]));
+	const int64 LastSeq = Seq(Objects[0]);
+	Client->Flush();
+	TF_REQUIRE_TRUE(Transport->Complete(200), "Recovery records delivered");
+
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Volume = 3;
+	Crate = FVector(100.0, 0.0, 0.0);
+	Client->Tick(3.0);
+	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 3, "Closing the recording sends the marker in its own request");
+	const TSharedPtr<FJsonObject> Body = Parse(Transport->Bodies.Last());
+	TF_REQUIRE(Body.Get(), "Valid marker JSON");
+	const TArray<TSharedPtr<FJsonValue>>& Sent = Body->GetArrayField(TEXT("events"));
+	TF_REQUIRE_TRUE(Sent.Num() == 1, "Marker alone");
+	const TSharedPtr<FJsonObject> Marker = Sent[0]->AsObject();
+	TestEqual(TEXT("Marker"), Marker->GetStringField(TEXT("$name")), FString(TEXT("$tf_telemetry_complete")));
+	TestEqual(TEXT("The marker takes the next seq"), Seq(Marker), LastSeq + 1);
+	TestEqual(TEXT("Dropped state and object records count toward dropped_events"), Marker->GetIntegerField(TEXT("dropped_events")), 2);
+	States = Records(*Client, TEXT("$tf_state"));
+	Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(States.Num() == 1 && Objects.Num() == 1, "State and objects continue after the recording closes");
+	TestFalse(TEXT("State after closure omits the recording"), HasRecording(States[0]));
+	TestFalse(TEXT("Objects after closure omit the recording"), HasRecording(Objects[0]));
+	TestTrue(TEXT("Records after the marker follow it"), Seq(States[0]) > Seq(Marker) && Seq(Objects[0]) > Seq(Marker));
+	TF_REQUIRE_TRUE(Transport->Complete(200), "Marker acknowledged");
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
 	return true;
 }
 

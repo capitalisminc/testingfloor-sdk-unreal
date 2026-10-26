@@ -447,7 +447,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 		Object->SetStringField(TEXT("$user_id"), Settings.UserID);
 	}
 	const TSharedRef<FJsonObject> Platform = MakeShared<FJsonObject>();
-	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.3.0"));
+	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.4.0"));
 	if (Event.Sequence > 0)
 	{
 		Platform->SetField(TEXT("seq"), MakeShared<FJsonValueNumberString>(LexToString(Event.Sequence)));
@@ -584,6 +584,12 @@ FClient::FClient(FSettings InSettings, FEnvironment Environment, TSharedRef<ITra
 		bRecordingRegistered = IFileManager::Get().DirectoryExists(*Settings.Recording->TelemetryDirectory)
 			&& FFileHelper::SaveStringToFile(TEXT(""), *Path);
 		if (!bRecordingRegistered) Settings.Recording.Reset();
+		if (bRecordingRegistered)
+		{
+			// Registering with a recording starts it from complete state and object keyframes.
+			bStateKeyframeDue = true;
+			bObjectKeyframeDue = true;
+		}
 	}
 
 }
@@ -782,6 +788,7 @@ void FClient::PollState(FDateTime Timestamp, const FActivitySample* Sample)
 	const TMap<FString, TSharedPtr<FJsonValue>>& Values = Current.GetValues();
 	const bool bKeyframe = bStateKeyframeDue;
 	FEvent Record{ FGuid::NewGuid(), Private::StateRecordName, Timestamp, SessionID, {} };
+	Record.Recording = ActiveRecording();
 	Record.bKeyframe = bKeyframe;
 	if (bKeyframe)
 	{
@@ -886,6 +893,7 @@ void FClient::FinishRecording()
 	bRecordingClosed = true;
 	FEvent Marker{ FGuid::NewGuid(), TEXT("$tf_telemetry_complete"), Clock(), SessionID, {} };
 	Marker.Recording = Settings.Recording;
+	Marker.Sequence = NextSequence++;
 	// Control records must remain possible even when the gameplay queue is full.
 	Queue.Add(MoveTemp(Marker));
 	bFlushRequested = true;
@@ -1362,6 +1370,7 @@ void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
 			}
 		}
 		FEvent Record{ FGuid::NewGuid(), Private::ObjectsRecordName, Timestamp, SessionID, LevelContext };
+		Record.Recording = ActiveRecording();
 		Record.bKeyframe = bKeyframe;
 		const auto PutArray = [&Record](const TCHAR* Key, TArray<TSharedPtr<FJsonValue>>& Values) {
 			if (!Values.IsEmpty())
