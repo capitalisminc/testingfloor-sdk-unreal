@@ -280,6 +280,7 @@ private:
 		FString ID;
 		FString Kind;
 		FPositionSource Position;
+		/** The position read at registration until the first check, then the latest checked position. */
 		TOptional<FVector> LastKnown;
 		TOptional<FVector> LastSent;
 		TMap<FString, TSharedPtr<FJsonValue>> State;
@@ -289,7 +290,7 @@ private:
 	{
 		FString ID;
 		FString Kind;
-		TOptional<FVector> Sample;
+		TArray<FVector> Samples;
 		TArray<TPair<FString, TSharedPtr<FJsonValue>>> State;
 		FString RemovedReason;
 	};

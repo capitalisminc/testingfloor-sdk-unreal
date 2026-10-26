@@ -180,9 +180,9 @@ TSharedPtr<FJsonValue> Centimeters(double Value)
 	return MakeShared<FJsonValueNumber>(Rounded == 0.0 ? 0.0 : Rounded);
 }
 
-int32 EstimateBytes(const FString& ID, const FString& Kind, bool bSample, const TArray<TPair<FString, TSharedPtr<FJsonValue>>>& State, const FString& Reason)
+int32 EstimateBytes(const FString& ID, const FString& Kind, int32 Samples, const TArray<TPair<FString, TSharedPtr<FJsonValue>>>& State, const FString& Reason)
 {
-	int32 Bytes = bSample ? ID.Len() + Kind.Len() + 48 : 0;
+	int32 Bytes = Samples * (ID.Len() + Kind.Len() + 48);
 	for (const auto& Pair : State)
 	{
 		Bytes += ID.Len() + Pair.Key.Len() + (Pair.Value->Type == EJson::String ? Pair.Value->AsString().Len() : 24) + 12;
@@ -1225,8 +1225,21 @@ void FClient::RemoveObject(uint64 Token, const FString& Reason)
 	}
 	ObjectTokens.Remove(Object.ID);
 	const TOptional<FVector> Final = Private::FinitePosition(Object.Position());
-	FObjectRows Rows{ Object.ID, Object.Kind, Final.IsSet() ? Final : Object.LastKnown };
-	if (!Rows.Sample.IsSet())
+	FObjectRows Rows{ Object.ID, Object.Kind };
+	if (!Object.LastSent.IsSet() && Object.LastKnown.IsSet())
+	{
+		// Never checked: a short-lived object still gets a start and an end.
+		Rows.Samples.Add(Object.LastKnown.GetValue());
+	}
+	if (Final.IsSet())
+	{
+		Rows.Samples.Add(Final.GetValue());
+	}
+	else if (Object.LastSent.IsSet() && Object.LastKnown.IsSet())
+	{
+		Rows.Samples.Add(Object.LastKnown.GetValue());
+	}
+	if (Rows.Samples.IsEmpty())
 	{
 		// An object that never had a position never appeared.
 		return;
@@ -1265,14 +1278,20 @@ void FClient::CheckObjects()
 			RemoveObject(Token, TEXT("gone"));
 			continue;
 		}
-		Object.LastKnown = Position;
 		FObjectRows Changes{ Object.ID, Object.Kind };
-		if (bKeyframe || !Object.LastSent.IsSet()
+		if (!Object.LastSent.IsSet() && Object.LastKnown.IsSet())
+		{
+			// The first sample is where the object was registered.
+			Changes.Samples.Add(Object.LastKnown.GetValue());
+			Object.LastSent = Object.LastKnown;
+		}
+		if (!Object.LastSent.IsSet() || (bKeyframe && Changes.Samples.IsEmpty())
 			|| FVector::Distance(Position.GetValue(), Object.LastSent.GetValue()) >= Private::ObjectMinMoveCentimeters)
 		{
-			Changes.Sample = Position;
+			Changes.Samples.Add(Position.GetValue());
 			Object.LastSent = Position;
 		}
+		Object.LastKnown = Position;
 		if (bKeyframe)
 		{
 			for (const auto& Pair : Object.State)
@@ -1288,7 +1307,7 @@ void FClient::CheckObjects()
 			}
 		}
 		Object.ChangedState.Reset();
-		if (Changes.Sample.IsSet() || !Changes.State.IsEmpty())
+		if (!Changes.Samples.IsEmpty() || !Changes.State.IsEmpty())
 		{
 			Rows.Add(MoveTemp(Changes));
 		}
@@ -1309,8 +1328,8 @@ void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
 		for (End = Start; End < Rows.Num(); ++End)
 		{
 			const FObjectRows& Row = Rows[End];
-			const int32 RowSamples = Row.Sample.IsSet() ? 1 : 0;
-			const int32 RowBytes = Private::EstimateBytes(Row.ID, Row.Kind, Row.Sample.IsSet(), Row.State, Row.RemovedReason);
+			const int32 RowSamples = Row.Samples.Num();
+			const int32 RowBytes = Private::EstimateBytes(Row.ID, Row.Kind, RowSamples, Row.State, Row.RemovedReason);
 			if (End > Start && (Samples + RowSamples > Private::ObjectRecordMaxSamples || Bytes + RowBytes > Private::ObjectRecordByteBudget))
 			{
 				break;
@@ -1322,13 +1341,13 @@ void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
 		for (int32 Index = Start; Index < End; ++Index)
 		{
 			const FObjectRows& Row = Rows[Index];
-			if (Row.Sample.IsSet())
+			for (const FVector& Sample : Row.Samples)
 			{
 				SampleIDs.Add(MakeShared<FJsonValueString>(Row.ID));
 				Kinds.Add(MakeShared<FJsonValueString>(Row.Kind));
-				X.Add(Private::Centimeters(Row.Sample->X));
-				Y.Add(Private::Centimeters(Row.Sample->Y));
-				Z.Add(Private::Centimeters(Row.Sample->Z));
+				X.Add(Private::Centimeters(Sample.X));
+				Y.Add(Private::Centimeters(Sample.Y));
+				Z.Add(Private::Centimeters(Sample.Z));
 			}
 			for (const auto& Pair : Row.State)
 			{

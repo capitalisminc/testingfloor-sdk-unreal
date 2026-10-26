@@ -346,6 +346,35 @@ bool FTestingFloorObjectSamplingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorObjectFirstSampleTest, "TestingFloor.Sdk.Schema2.ObjectFirstSample", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorObjectFirstSampleTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const auto Client = Create(Settings());
+	FVector Drone = FVector::ZeroVector;
+	FVector Cart = FVector::ZeroVector;
+	FVector Rocket(0.0, 0.0, 100.0);
+	Client->TrackObject(TEXT("drone"), [&Drone] { return TOptional<FVector>(Drone); }, TEXT("drone"));
+	Client->TrackObject(TEXT("cart"), [&Cart] { return TOptional<FVector>(Cart); }, TEXT("cart"));
+	const uint64 RocketToken = Client->TrackObject(TEXT("rocket"), [&Rocket] { return TOptional<FVector>(Rocket); }, TEXT("rocket"));
+	Drone = FVector(30.0, 0.0, 0.0);
+	Cart = FVector(10.0, 0.0, 0.0);
+	Rocket = FVector(100.0, 0.0, 100.0);
+	Client->RemoveObject(RocketToken, TEXT("exploded"));
+	Client->Tick(0.0);
+	auto Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(Objects.Num() == 1, "One record for the first check");
+	TestEqual(TEXT("Registration position first, then a move of 0.25 m in the same record"), Array(Objects[0], TEXT("sample.id")), FString(TEXT("drone,drone,cart,rocket,rocket")));
+	TestEqual(TEXT("A smaller move keeps only the registration position; a removed object gets a start and an end"), Array(Objects[0], TEXT("sample.x")), FString(TEXT("0,30,0,0,100")));
+	TestEqual(TEXT("Removal follows its samples"), Array(Objects[0], TEXT("removed.reason")), FString(TEXT("exploded")));
+	Cart = FVector(25.0, 0.0, 0.0);
+	Client->Tick(0.25);
+	Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(Objects.Num() == 2, "The registration sample is the baseline for the next move");
+	TestEqual(TEXT("25 cm from the registration position"), Array(Objects[1], TEXT("sample.id")), FString(TEXT("cart")));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorObjectKeyframeTest, "TestingFloor.Sdk.Schema2.ObjectKeyframes", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorObjectKeyframeTest::RunTest(const FString& Parameters)
 {
