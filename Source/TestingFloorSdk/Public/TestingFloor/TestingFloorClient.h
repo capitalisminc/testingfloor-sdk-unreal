@@ -236,7 +236,8 @@ private:
 	/** RecordingCount of the dropped records were attached to the recording; they count toward `dropped_events`. */
 	void NoteDropped(int32 Count, int32 RecordingCount = 0);
 	TOptional<FRecordingContext> ActiveRecording() const;
-	void PollState(FDateTime Timestamp, const FActivitySample* Sample);
+	/** Returns whether a state keyframe was queued. */
+	bool PollState(FDateTime Timestamp, const FActivitySample* Sample);
 	void SetObjectStateValue(uint64 Token, const FString& Key, const FProperties& Value);
 	/** Returns whether work waits for a later check: a carried removal or an object held behind one. */
 	bool CheckObjects();

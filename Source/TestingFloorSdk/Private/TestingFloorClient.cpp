@@ -717,10 +717,17 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 		Sample = ActivitySource();
 	}
 	// State changes are queued first, so the state at every event is exact.
-	PollState(Timestamp, Sample.GetPtrOrNull());
+	const bool bStateKeyframeQueued = PollState(Timestamp, Sample.GetPtrOrNull());
 	if (GetPendingEventCount() >= FMath::Max(1, Settings.QueueMaxEvents))
 	{
 		NoteDropped(1, ActiveRecording().IsSet() ? 1 : 0);
+		// A gameplay event carries no session state. When the keyframe queued for it already holds every
+		// value, the drop needs no further state keyframe, which in a full queue would take the slot from
+		// every later event.
+		if (bStateKeyframeQueued)
+		{
+			bStateKeyframeDue = false;
+		}
 		return false;
 	}
 	FEvent Event{ FGuid::NewGuid(), Name, Timestamp, SessionID, {} };
@@ -749,6 +756,11 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 	}
 	if (!Enqueue(MoveTemp(Event)))
 	{
+		// Enqueue counted the dropped event.
+		if (bStateKeyframeQueued)
+		{
+			bStateKeyframeDue = false;
+		}
 		return false;
 	}
 	LevelContext = MoveTemp(Level);
@@ -790,7 +802,7 @@ void FClient::NoteDropped(int32 Count, int32 RecordingCount)
 	}
 }
 
-void FClient::PollState(FDateTime Timestamp, const FActivitySample* Sample)
+bool FClient::PollState(FDateTime Timestamp, const FActivitySample* Sample)
 {
 	FProperties Current;
 	if (Sample && Sample->CameraFOV.IsSet())
@@ -836,7 +848,7 @@ void FClient::PollState(FDateTime Timestamp, const FActivitySample* Sample)
 	const bool bSend = !Record.Properties.GetValues().IsEmpty() || (bKeyframe && bStateSent);
 	if (!bSend || !Enqueue(MoveTemp(Record)))
 	{
-		return;
+		return false;
 	}
 	bStateSent = true;
 	SentState = Values;
@@ -845,6 +857,7 @@ void FClient::PollState(FDateTime Timestamp, const FActivitySample* Sample)
 		bStateKeyframeDue = false;
 		StateKeyframeSeconds = bClockStarted ? CurrentSeconds : -1.0;
 	}
+	return bKeyframe;
 }
 
 void FClient::Tick()
@@ -1196,7 +1209,13 @@ uint64 FClient::TrackObject(const FString& Kind, FPositionSource PositionCentime
 	FString ObjectID = ID.TrimStartAndEnd();
 	if (ObjectID.IsEmpty())
 	{
-		ObjectID = FString::Printf(TEXT("%s#%d"), *ObjectKind, ++ObjectCounters.FindOrAdd(ObjectKind));
+		// Generated IDs skip IDs that a live object or a waiting removal uses, such as an explicit
+		// `crate#1`, so two unrelated objects never share one path.
+		int32& Counter = ObjectCounters.FindOrAdd(ObjectKind);
+		do
+		{
+			ObjectID = FString::Printf(TEXT("%s#%d"), *ObjectKind, ++Counter);
+		} while (ObjectTokens.Contains(ObjectID) || HasPendingRemoval(ObjectID));
 	}
 	if (const uint64* Existing = ObjectTokens.Find(ObjectID))
 	{

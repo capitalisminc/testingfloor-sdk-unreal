@@ -532,6 +532,57 @@ bool FTestingFloorRecoveryProgressTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorEventProgressTest, "TestingFloor.Sdk.Schema2.EventsProgressInASmallQueue", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorEventProgressTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	auto ClientSettings = Settings();
+	ClientSettings.QueueMaxEvents = 1;
+	const auto Transport = MakeShared<FTransport>();
+	const auto Client = Create(ClientSettings, Transport);
+	Client->SetState(TEXT("difficulty"), TEXT("hard"));
+	for (int32 Attempt = 0; Attempt < 3; ++Attempt)
+	{
+		Client->Track(TEXT("weapon_fire"));
+		Client->Flush();
+		Transport->Complete(200);
+	}
+	int32 Events = 0;
+	int32 States = 0;
+	for (const FString& Sent : Transport->Bodies)
+	{
+		const TSharedPtr<FJsonObject> Body = Parse(Sent);
+		TF_REQUIRE(Body.Get(), "Valid batch JSON");
+		for (const TSharedPtr<FJsonValue>& Value : Body->GetArrayField(TEXT("events")))
+		{
+			const FString Name = Value->AsObject()->GetStringField(TEXT("$name"));
+			Events += Name == TEXT("weapon_fire") ? 1 : 0;
+			States += Name == TEXT("$tf_state") ? 1 : 0;
+		}
+	}
+	TestEqual(TEXT("Only the first event loses its slot to the start keyframe"), Events, 2);
+	TestEqual(TEXT("The dropped event does not repeat the keyframe that was queued for it"), States, 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorGeneratedIDTest, "TestingFloor.Sdk.Schema2.GeneratedIDsSkipUsedIDs", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorGeneratedIDTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const auto Client = Create(Settings());
+	const uint64 Explicit = Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }, TEXT("crate#1"));
+	const uint64 Generated = Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector(500.0, 0.0, 0.0)); });
+	TestTrue(TEXT("Both handles are live"), Explicit != 0 && Generated != 0 && Explicit != Generated);
+	TestEqual(TEXT("A generated ID does not replace an explicit one"), Client->GetTrackedObjectCount(), 2);
+	Client->SetObjectState(Explicit, TEXT("open"), true);
+	Client->Tick(0.0);
+	const auto Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(Objects.Num() == 1, "Registration record");
+	TestEqual(TEXT("The generated ID skips the explicit one"), Array(Objects[0], TEXT("sample.id")), FString(TEXT("crate#1,crate#2")));
+	TestEqual(TEXT("The explicit handle still works"), Array(Objects[0], TEXT("state.id")), FString(TEXT("crate#1")));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorObjectSamplingTest, "TestingFloor.Sdk.Schema2.ObjectSamplingAndRemoval", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorObjectSamplingTest::RunTest(const FString& Parameters)
 {
