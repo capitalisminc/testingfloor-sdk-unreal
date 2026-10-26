@@ -274,6 +274,57 @@ bool FTestingFloorStateKeyframeTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorEmptyKeyframeTest, "TestingFloor.Sdk.Schema2.EmptyStateKeyframe", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorEmptyKeyframeTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const auto Client = Create(Settings());
+	Client->Tick(0.0);
+	TestEqual(TEXT("An empty start keyframe is skipped"), Records(*Client, TEXT("$tf_state")).Num(), 0);
+	Client->SetState(TEXT("difficulty"), TEXT("hard"));
+	Client->Tick(1.0);
+	auto States = Records(*Client, TEXT("$tf_state"));
+	TF_REQUIRE_TRUE(States.Num() == 1 && IsKeyframe(States[0]), "The first value goes out as the start keyframe");
+	Client->ClearState(TEXT("difficulty"));
+	Client->Tick(301.0);
+	States = Records(*Client, TEXT("$tf_state"));
+	TF_REQUIRE_TRUE(States.Num() == 2, "Clearing the last value when a keyframe is due still sends the keyframe");
+	TestTrue(TEXT("Empty keyframe"), IsKeyframe(States[1]));
+	TestEqual(TEXT("An empty keyframe clears every value"), Keys(States[1]), FString());
+	Client->Tick(302.0);
+	TestEqual(TEXT("Nothing changes after the empty keyframe"), Records(*Client, TEXT("$tf_state")).Num(), 2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorReusedIDTest, "TestingFloor.Sdk.Schema2.ReusedIDWaitsForRemoval", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorReusedIDTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	auto ClientSettings = Settings();
+	ClientSettings.QueueMaxEvents = 2;
+	const auto Transport = MakeShared<FTransport>();
+	const auto Client = Create(ClientSettings, Transport);
+	const uint64 Old = Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }, TEXT("crate"));
+	Client->Tick(0.0);
+	Client->Track(TEXT("level_loaded"));
+	Client->RemoveObject(Old, TEXT("destroyed"));
+	Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector(500.0, 0.0, 0.0)); }, TEXT("crate"));
+	Client->Tick(0.25);
+	TestEqual(TEXT("A full queue drops the removal record"), Client->GetDroppedEventCount(), 1);
+	Client->Flush();
+	TF_REQUIRE_TRUE(Transport->Complete(200), "Queue drained");
+	Client->Tick(0.5);
+	Client->Tick(0.75);
+	const auto Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(Objects.Num() == 2, "The removal, then the new path");
+	TestEqual(TEXT("The retried removal ends the old path"), Array(Objects[0], TEXT("removed.id")), FString(TEXT("crate")));
+	TestEqual(TEXT("The removal record holds only the old position"), Array(Objects[0], TEXT("sample.x")), FString(TEXT("0")));
+	TestEqual(TEXT("The new path starts in a later record"), Array(Objects[1], TEXT("sample.x")), FString(TEXT("500")));
+	TestFalse(TEXT("The new path's record has no removal"), Objects[1]->HasField(TEXT("removed.id")));
+	TestTrue(TEXT("The removal is queued first"), Seq(Objects[0]) < Seq(Objects[1]));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorObjectSamplingTest, "TestingFloor.Sdk.Schema2.ObjectSamplingAndRemoval", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorObjectSamplingTest::RunTest(const FString& Parameters)
 {

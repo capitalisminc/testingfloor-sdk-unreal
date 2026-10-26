@@ -239,6 +239,7 @@ private:
 	void PollState(FDateTime Timestamp, const FActivitySample* Sample);
 	void SetObjectStateValue(uint64 Token, const FString& Key, const FProperties& Value);
 	void CheckObjects();
+	bool HasPendingRemoval(const FString& ID) const;
 	struct FObjectRows;
 	void QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe);
 
@@ -271,6 +272,7 @@ private:
 
 	FProperties DirectState;
 	TMap<FString, TSharedPtr<FJsonValue>> SentState;
+	bool bStateSent = false;
 	bool bStateKeyframeDue = true;
 	double StateKeyframeSeconds = -1.0;
 	double LastStatePollSeconds = -1.0;

@@ -811,10 +811,13 @@ void FClient::PollState(FDateTime Timestamp, const FActivitySample* Sample)
 			}
 		}
 	}
-	if (Record.Properties.GetValues().IsEmpty() || !Enqueue(MoveTemp(Record)))
+	// Before anything is sent an empty keyframe has nothing to reset; after that, it clears every value.
+	const bool bSend = !Record.Properties.GetValues().IsEmpty() || (bKeyframe && bStateSent);
+	if (!bSend || !Enqueue(MoveTemp(Record)))
 	{
 		return;
 	}
+	bStateSent = true;
 	SentState = Values;
 	if (bKeyframe)
 	{
@@ -1164,11 +1167,6 @@ uint64 FClient::TrackObject(const FString& Kind, FPositionSource PositionCentime
 		}
 		return 0;
 	}
-	if (PendingRemovals.ContainsByPredicate([&ObjectID](const FObjectRows& Rows) { return Rows.ID == ObjectID; }))
-	{
-		// A reader must see the old path end before the new one starts.
-		CheckObjects();
-	}
 	FTrackedObject Object{ ObjectID, ObjectKind, MoveTemp(PositionCentimeters) };
 	Object.LastKnown = Private::FinitePosition(Object.Position());
 	const uint64 Token = NextObjectToken++;
@@ -1260,6 +1258,11 @@ void FClient::RemoveObject(uint64 Token, const FString& Reason)
 	PendingRemovals.Add(MoveTemp(Rows));
 }
 
+bool FClient::HasPendingRemoval(const FString& ID) const
+{
+	return PendingRemovals.ContainsByPredicate([&ID](const FObjectRows& Rows) { return Rows.ID == ID; });
+}
+
 int32 FClient::GetTrackedObjectCount() const
 {
 	return Objects.Num();
@@ -1280,6 +1283,11 @@ void FClient::CheckObjects()
 	for (const uint64 Token : Tokens)
 	{
 		FTrackedObject& Object = Objects[Token];
+		if (HasPendingRemoval(Object.ID))
+		{
+			// A reused ID waits until the old path's removal is queued, so a reader ends the old path first.
+			continue;
+		}
 		const TOptional<FVector> Position = Private::FinitePosition(Object.Position());
 		if (!Position.IsSet())
 		{
