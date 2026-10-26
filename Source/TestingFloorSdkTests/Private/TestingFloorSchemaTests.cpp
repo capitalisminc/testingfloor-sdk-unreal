@@ -459,6 +459,79 @@ bool FTestingFloorShutdownStateTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorShutdownLifetimesTest, "TestingFloor.Sdk.Schema2.ShutdownSendsWaitingLifetimes", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorShutdownLifetimesTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const auto Transport = MakeShared<FTransport>();
+	const auto Client = Create(Settings(), Transport);
+	const uint64 Old = Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }, TEXT("crate"));
+	Client->Tick(0.0);
+	Client->RemoveObject(Old, TEXT("destroyed"));
+	const uint64 New = Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector(500.0, 0.0, 0.0)); }, TEXT("crate"));
+	Client->RemoveObject(New, TEXT("destroyed"));
+	const uint64 Replacement = Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector(900.0, 0.0, 0.0)); }, TEXT("crate"));
+	TestTrue(TEXT("Third lifetime is live"), Replacement != 0);
+	Client->Shutdown(0.0);
+	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 1, "Shutdown flushes");
+	const TSharedPtr<FJsonObject> Body = Parse(Transport->Bodies[0]);
+	TF_REQUIRE(Body.Get(), "Valid shutdown JSON");
+	FString Removals;
+	FString Positions;
+	int64 LastSeq = 0;
+	bool bOrdered = true;
+	for (const TSharedPtr<FJsonValue>& Value : Body->GetArrayField(TEXT("events")))
+	{
+		const TSharedPtr<FJsonObject> Record = Value->AsObject();
+		bOrdered &= Seq(Record) > LastSeq;
+		LastSeq = Seq(Record);
+		Removals += TEXT("[") + Array(Record, TEXT("removed.id")) + TEXT("]");
+		Positions += TEXT("[") + Array(Record, TEXT("sample.x")) + TEXT("]");
+	}
+	TestEqual(TEXT("Each lifetime ends in its own record before shutdown"), Removals, FString(TEXT("[][crate][crate][]")));
+	TestEqual(TEXT("Registration, old end, second lifetime, live third lifetime"), Positions, FString(TEXT("[0][0][500,500][900]")));
+	TestTrue(TEXT("Records keep their order"), bOrdered);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecoveryProgressTest, "TestingFloor.Sdk.Schema2.RecoveryKeyframesProgress", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRecoveryProgressTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	auto ClientSettings = Settings();
+	ClientSettings.MaxTrackedObjects = 650;
+	ClientSettings.QueueMaxEvents = 2;
+	const auto Transport = MakeShared<FTransport>();
+	const auto Client = Create(ClientSettings, Transport);
+	for (int32 Index = 0; Index < 650; ++Index)
+	{
+		Client->TrackObject(TEXT("prop"), [Index] { return TOptional<FVector>(FVector(Index * 100.0, 0.0, 0.0)); });
+	}
+	TSet<FString> Delivered;
+	for (const double Now : { 0.0, 0.25 })
+	{
+		// Each check needs three records but the queue holds two.
+		Client->Tick(Now);
+		Client->Flush();
+		TF_REQUIRE_TRUE(Transport->Complete(200), "Queue drained");
+		const TSharedPtr<FJsonObject> Body = Parse(Transport->Bodies.Last());
+		TF_REQUIRE(Body.Get(), "Valid batch JSON");
+		for (const TSharedPtr<FJsonValue>& Value : Body->GetArrayField(TEXT("events")))
+		{
+			const TArray<TSharedPtr<FJsonValue>>* IDs = nullptr;
+			if (Value->AsObject()->TryGetArrayField(TEXT("sample.id"), IDs))
+			{
+				for (const TSharedPtr<FJsonValue>& ID : *IDs)
+				{
+					Delivered.Add(ID->AsString());
+				}
+			}
+		}
+	}
+	TestEqual(TEXT("The recovery keyframe starts with the objects refused before"), Delivered.Num(), 650);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorObjectSamplingTest, "TestingFloor.Sdk.Schema2.ObjectSamplingAndRemoval", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorObjectSamplingTest::RunTest(const FString& Parameters)
 {

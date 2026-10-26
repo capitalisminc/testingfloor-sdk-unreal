@@ -238,7 +238,8 @@ private:
 	TOptional<FRecordingContext> ActiveRecording() const;
 	void PollState(FDateTime Timestamp, const FActivitySample* Sample);
 	void SetObjectStateValue(uint64 Token, const FString& Key, const FProperties& Value);
-	void CheckObjects();
+	/** Returns whether work waits for a later check: a carried removal or an object held behind one. */
+	bool CheckObjects();
 	bool HasPendingRemoval(const FString& ID) const;
 	void TrimPendingRemovals();
 	struct FObjectRows;
@@ -301,6 +302,8 @@ private:
 	TMap<FString, uint64> ObjectTokens;
 	TMap<FString, int32> ObjectCounters;
 	TArray<FObjectRows> PendingRemovals;
+	/** Objects whose rows a full queue refused; the next check sends them first. */
+	TSet<FString> RefusedObjectIDs;
 	uint64 NextObjectToken = 1;
 	double NextObjectCheckSeconds = -1.0;
 	bool bObjectKeyframeDue = false;

@@ -1021,7 +1021,24 @@ void FClient::Shutdown(double TimeoutSeconds)
 			Sample = ActivitySource();
 		}
 		PollState(Clock(), Sample.GetPtrOrNull());
-		CheckObjects();
+		// A check ends one lifetime of an ID, so lifetimes waiting behind it need more checks. Stop
+		// when nothing waits or the queue refuses the next removal.
+		const int32 MaxChecks = PendingRemovals.Num() + 2;
+		for (int32 Check = 0; Check < MaxChecks; ++Check)
+		{
+			const int32 Waiting = PendingRemovals.Num();
+			if (!CheckObjects() || (Waiting > 0 && PendingRemovals.Num() >= Waiting))
+			{
+				break;
+			}
+		}
+		if (!PendingRemovals.IsEmpty())
+		{
+			// Removals that never reach the queue are counted, so the completion marker reports them.
+			const int32 Abandoned = PendingRemovals.Num();
+			PendingRemovals.Reset();
+			NoteDropped(Abandoned, ActiveRecording().IsSet() ? Abandoned : 0);
+		}
 	}
 	bShutdown = true;
 	FinishRecording();
@@ -1309,7 +1326,7 @@ int32 FClient::GetTrackedObjectCount() const
 	return Objects.Num();
 }
 
-void FClient::CheckObjects()
+bool FClient::CheckObjects()
 {
 	const bool bKeyframe = bObjectKeyframeDue && !Objects.IsEmpty();
 	if (bObjectKeyframeDue)
@@ -1320,6 +1337,21 @@ void FClient::CheckObjects()
 	TArray<uint64> Tokens;
 	Objects.GetKeys(Tokens);
 	Tokens.Sort();
+	if (!RefusedObjectIDs.IsEmpty())
+	{
+		// Recovery keyframes that need more records than the queue holds would otherwise repeat the
+		// same first objects; the objects refused last time go first instead.
+		TArray<uint64> Refused;
+		TArray<uint64> Rest;
+		for (const uint64 Token : Tokens)
+		{
+			(RefusedObjectIDs.Contains(Objects[Token].ID) ? Refused : Rest).Add(Token);
+		}
+		Refused.Append(Rest);
+		Tokens = MoveTemp(Refused);
+		RefusedObjectIDs.Reset();
+	}
+	bool bDeferred = false;
 	TArray<FObjectRows> Rows;
 	// Readers apply a record's samples before its removals, so a check ends at most one lifetime of an
 	// ID. A later lifetime's removal waits for the next check, after the earlier path has ended.
@@ -1345,6 +1377,7 @@ void FClient::CheckObjects()
 		if (HasPendingRemoval(Object.ID) || EndedIDs.Contains(Object.ID))
 		{
 			// A reused ID waits until the old path's removal is queued, so a reader ends the old path first.
+			bDeferred = true;
 			continue;
 		}
 		const TOptional<FVector> Reading = Object.Position();
@@ -1395,6 +1428,7 @@ void FClient::CheckObjects()
 	}
 	TakeRemovals();
 	QueueObjectRecords(Rows, bKeyframe);
+	return bDeferred || !PendingRemovals.IsEmpty();
 }
 
 void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
@@ -1469,6 +1503,10 @@ void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
 				if (!Rows[Index].RemovedReason.IsEmpty())
 				{
 					Refused.Add(Rows[Index]);
+				}
+				else
+				{
+					RefusedObjectIDs.Add(Rows[Index].ID);
 				}
 			}
 		}
