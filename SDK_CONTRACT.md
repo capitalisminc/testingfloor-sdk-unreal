@@ -20,6 +20,28 @@ For setup and code examples, start with the README in the SDK you use.
   arguments permit sidecar fallback. Timestamped handoffs older than 12 hours are ignored.
 - Old recorder session aliases and `session-payload.json` are not supported.
 
+## Recording delivery completion
+
+The recorder supplies `telemetry_directory` in the recording handoff. It creates
+this directory and keeps it for the recording. Each SDK Play run registers by
+creating `<play-session-id>.session` before admitting recording events. If
+`closed.json` already exists, it admits no recording events. The recorder writes
+`closed.json` before taking its final participant list, so a concurrent Play boot
+cannot produce an undiscovered run.
+
+The SDK watches `closed.json` while Play continues. Closing the recording or
+shutting down a Play run stops attaching new events to that recording and queues
+`$tf_telemetry_complete`. The marker carries the recording UUID, Play-session ID
+and `dropped_events`. It owns a separate request, sent only after preceding
+requests succeed or are explicitly counted as dropped. It bypasses the gameplay
+queue capacity. A nonzero dropped count means incomplete telemetry.
+
+The receiver acknowledges batches only after its warehouse write succeeds.
+Seeing every registered participant's marker in the warehouse therefore closes
+the recording's delivery barrier. An empty participant list is explicit. Crashes
+or failed shutdown flushes can leave a participant without a marker; consumers
+must use a bounded timeout and preserve the incomplete status.
+
 ## Event capture and properties
 
 Event name, UUID, UTC timestamp, play session, recording, and context are captured

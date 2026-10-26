@@ -25,8 +25,8 @@ jobs:
           Source/TestingFloorSdk/Private/ThirdParty/QrCodeGenerator/qrcodegen.c
           -o "$RUNNER_TEMP/qrcodegen.o"
       - name: Package source plugin
-        run: python3 scripts/package.py --output dist/TestingFloor-0.2.0.zip
+        run: python3 scripts/package.py --output dist/TestingFloor-0.3.0.zip
       - uses: actions/upload-artifact@v4
         with:
           name: TestingFloor-source
-          path: dist/TestingFloor-0.2.0.zip
+          path: dist/TestingFloor-0.3.0.zip

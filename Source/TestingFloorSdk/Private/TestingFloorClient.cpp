@@ -2,6 +2,7 @@
 
 #include "Dom/JsonObject.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
 #include "HAL/PlatformProperties.h"
 #include "Internationalization/Internationalization.h"
@@ -272,6 +273,7 @@ TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDate
 	}
 	FRecordingContext Result;
 	Object->TryGetStringField(TEXT("recording_uuid"), Result.RecordingUUID);
+	Object->TryGetStringField(TEXT("telemetry_directory"), Result.TelemetryDirectory);
 	Result.RecordingUUID.TrimStartAndEndInline();
 	if (Result.RecordingUUID.IsEmpty())
 	{
@@ -398,7 +400,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 		Object->SetStringField(TEXT("$user_id"), Settings.UserID);
 	}
 	const TSharedRef<FJsonObject> Platform = MakeShared<FJsonObject>();
-	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.2.0"));
+	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.3.0"));
 	Platform->SetStringField(TEXT("engine"), TEXT("Unreal ") + Settings.EngineVersion);
 	Platform->SetStringField(TEXT("app_version"), Settings.AppVersion);
 	Platform->SetStringField(TEXT("os"), Settings.OperatingSystem);
@@ -416,9 +418,9 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 	{
 		Platform->SetNumberField(TEXT("screen_height"), ScreenSize.Y);
 	}
-	if (Settings.Recording.IsSet())
+	if (Event.Recording.IsSet())
 	{
-		const FRecordingContext& Recording = Settings.Recording.GetValue();
+		const FRecordingContext& Recording = Event.Recording.GetValue();
 		Platform->SetStringField(TEXT("recording_uuid"), Recording.RecordingUUID);
 		if (Recording.PlaytestID.IsSet())
 		{
@@ -429,7 +431,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 	return Private::Encode(Object);
 }
 
-FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FDateTime SentAt, int32& OutConsumed)
+FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FDateTime SentAt, int32& OutConsumed, int32* OutWritten)
 {
 	FString Body;
 	const auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Body);
@@ -442,6 +444,9 @@ FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FD
 	OutConsumed = 0;
 	for (const FEvent& Event : Events)
 	{
+		// A completion marker is its own request, after preceding requests succeed.
+		if ((Event.Name == TEXT("$tf_telemetry_complete") && OutConsumed > 0)
+			|| (OutConsumed > 0 && Events[0].Name == TEXT("$tf_telemetry_complete"))) break;
 		if (Written >= FMath::Clamp(Settings.BatchMaxEvents, 1, 2000))
 		{
 			break;
@@ -465,6 +470,7 @@ FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FD
 	Writer->WriteArrayEnd();
 	Writer->WriteObjectEnd();
 	Writer->Close();
+	if (OutWritten) *OutWritten = Written;
 	return Written > 0 ? Body : FString();
 }
 
@@ -513,6 +519,15 @@ FClient::FClient(FSettings InSettings, FEnvironment Environment, TSharedRef<ITra
 		? EState::Disabled
 		: EState::NotConfigured;
 	SessionID = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+	if (State == EState::Ok && Settings.Recording.IsSet() && !Settings.Recording->TelemetryDirectory.IsEmpty())
+	{
+		const FString Path = Settings.Recording->TelemetryDirectory / (SessionID + TEXT(".session"));
+		// The recorder creates the directory. Register before admitting events.
+		bRecordingRegistered = IFileManager::Get().DirectoryExists(*Settings.Recording->TelemetryDirectory)
+			&& FFileHelper::SaveStringToFile(TEXT(""), *Path);
+		if (!bRecordingRegistered) Settings.Recording.Reset();
+	}
+
 }
 
 void FClient::SetContextProvider(FContextProvider Provider)
@@ -602,7 +617,10 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 		++DroppedEvents;
 		return false;
 	}
+	if (bRecordingRegistered && !bRecordingClosed
+		&& IFileManager::Get().FileExists(*(Settings.Recording->TelemetryDirectory / TEXT("closed.json")))) FinishRecording();
 	FEvent Event{ FGuid::NewGuid(), Name, Clock(), SessionID, {} };
+	if (!bRecordingClosed) Event.Recording = Settings.Recording;
 	if (ContextProvider)
 	{
 		ContextProvider(Event.Properties);
@@ -636,6 +654,8 @@ void FClient::Tick(double NowSeconds)
 {
 	check(IsInGameThread());
 	CurrentSeconds = NowSeconds;
+	if (bRecordingRegistered && !bRecordingClosed
+		&& IFileManager::Get().FileExists(*(Settings.Recording->TelemetryDirectory / TEXT("closed.json")))) FinishRecording();
 	if (Settings.bMovementTracking && !bShutdown && ActivitySource && (State == EState::Ok || State == EState::NetworkDown))
 	{
 		if (Teleports.IsEmpty())
@@ -655,6 +675,17 @@ void FClient::Tick(double NowSeconds)
 	}
 }
 
+void FClient::FinishRecording()
+{
+	if (bRecordingClosed || !bRecordingRegistered) return;
+	bRecordingClosed = true;
+	FEvent Marker{ FGuid::NewGuid(), TEXT("$tf_telemetry_complete"), Clock(), SessionID, {} };
+	Marker.Recording = Settings.Recording;
+	// Control records must remain possible even when the gameplay queue is full.
+	Queue.Add(MoveTemp(Marker));
+	bFlushRequested = true;
+}
+
 void FClient::Flush()
 {
 	bFlushRequested = true;
@@ -663,7 +694,13 @@ void FClient::Flush()
 		return;
 	}
 	int32 Consumed = 0;
-	const FString Body = BuildBatch(Queue, Settings, Clock(), Consumed);
+	if (Queue[0].Name == TEXT("$tf_telemetry_complete"))
+	{
+		Queue[0].Properties.Set(TEXT("dropped_events"), DroppedEvents);
+	}
+	int32 Written = 0;
+	const FString Body = BuildBatch(Queue, Settings, Clock(), Consumed, &Written);
+	DroppedEvents += Consumed - Written;
 	if (Consumed == 0)
 	{
 		return;
@@ -672,7 +709,6 @@ void FClient::Flush()
 	Queue.RemoveAt(0, Consumed, EAllowShrinking::No);
 	if (Body.IsEmpty())
 	{
-		DroppedEvents += InFlight.Num();
 		InFlight.Reset();
 		return;
 	}
@@ -736,6 +772,7 @@ void FClient::Shutdown(double TimeoutSeconds)
 	FTSTicker::RemoveTicker(TickerHandle);
 	TickerHandle.Reset();
 	bShutdown = true;
+	FinishRecording();
 	Flush();
 	const double Deadline = FPlatformTime::Seconds() + FMath::Clamp(TimeoutSeconds, 0.0, 5.0);
 	double Previous = FPlatformTime::Seconds();

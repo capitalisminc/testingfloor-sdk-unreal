@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- Register each Play run with its recorder and close recording telemetry with an acknowledged flush marker.
+- Keep completion markers behind earlier batch acknowledgments, report dropped events, and detach later gameplay from stopped recordings.
+
 ## 0.2.0 — Unreleased
 
 ### Changed (breaking)
