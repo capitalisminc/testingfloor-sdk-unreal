@@ -10,6 +10,7 @@
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include <limits>
 
 namespace TestingFloorSchemaTests
 {
@@ -322,6 +323,38 @@ bool FTestingFloorReusedIDTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("The new path starts in a later record"), Array(Objects[1], TEXT("sample.x")), FString(TEXT("500")));
 	TestFalse(TEXT("The new path's record has no removal"), Objects[1]->HasField(TEXT("removed.id")));
 	TestTrue(TEXT("The removal is queued first"), Seq(Objects[0]) < Seq(Objects[1]));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorNonFinitePositionTest, "TestingFloor.Sdk.Schema2.NonFinitePositionIsSkipped", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorNonFinitePositionTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const auto Client = Create(Settings());
+	FVector Crate(std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0);
+	Client->TrackObject(TEXT("crate"), [&Crate] { return TOptional<FVector>(Crate); }, TEXT("crate"));
+	Client->Tick(0.0);
+	TestEqual(TEXT("A NaN registration position is not sent"), Records(*Client, TEXT("$tf_objects")).Num(), 0);
+	TestEqual(TEXT("A NaN position does not end the object"), Client->GetTrackedObjectCount(), 1);
+	Crate = FVector(100.0, 0.0, 100.0);
+	Client->Tick(0.25);
+	auto Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(Objects.Num() == 1, "The first finite position is sent");
+	TestEqual(TEXT("First finite position"), Array(Objects[0], TEXT("sample.x")), FString(TEXT("100")));
+	Crate = FVector(500.0, std::numeric_limits<double>::infinity(), 500.0);
+	Client->Tick(0.5);
+	TestEqual(TEXT("An infinite position is skipped"), Records(*Client, TEXT("$tf_objects")).Num(), 1);
+	TestEqual(TEXT("An infinite position does not end the object"), Client->GetTrackedObjectCount(), 1);
+	Crate = FVector(500.0, 0.0, 500.0);
+	Client->Tick(0.75);
+	Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(Objects.Num() == 2, "The next finite position is sent");
+	TestEqual(TEXT("Next finite position"), Array(Objects[1], TEXT("sample.x")), FString(TEXT("500")));
+	for (const TestingFloor::FEvent& Event : Client->GetQueuedEvents())
+	{
+		const FString Json = TestingFloor::SerializeEvent(Event, Settings());
+		TestFalse(TEXT("No non-finite number reaches the wire"), Json.Contains(TEXT("nan"), ESearchCase::IgnoreCase) || Json.Contains(TEXT("inf"), ESearchCase::IgnoreCase));
+	}
 	return true;
 }
 

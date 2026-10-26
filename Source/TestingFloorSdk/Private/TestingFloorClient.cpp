@@ -1288,7 +1288,13 @@ void FClient::CheckObjects()
 			// A reused ID waits until the old path's removal is queued, so a reader ends the old path first.
 			continue;
 		}
-		const TOptional<FVector> Position = Private::FinitePosition(Object.Position());
+		const TOptional<FVector> Reading = Object.Position();
+		if (Reading.IsSet() && Reading->ContainsNaN())
+		{
+			// A NaN or infinite axis cannot be written as JSON: skip this check without ending the object.
+			continue;
+		}
+		const TOptional<FVector> Position = Reading;
 		if (!Position.IsSet())
 		{
 			RemoveObject(Token, TEXT("gone"));
