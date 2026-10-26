@@ -708,8 +708,7 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 	{
 		return false;
 	}
-	if (bRecordingRegistered && !bRecordingClosed
-		&& IFileManager::Get().FileExists(*(Settings.Recording->TelemetryDirectory / TEXT("closed.json")))) FinishRecording();
+	CheckRecordingClosed();
 	const FDateTime Timestamp = Clock();
 	TOptional<FActivitySample> Sample;
 	if (ActivitySource)
@@ -869,8 +868,7 @@ void FClient::Tick(double NowSeconds)
 {
 	check(IsInGameThread());
 	CurrentSeconds = NowSeconds;
-	if (bRecordingRegistered && !bRecordingClosed
-		&& IFileManager::Get().FileExists(*(Settings.Recording->TelemetryDirectory / TEXT("closed.json")))) FinishRecording();
+	CheckRecordingClosed();
 	if (!bClockStarted)
 	{
 		bClockStarted = true;
@@ -921,6 +919,48 @@ void FClient::Tick(double NowSeconds)
 			|| NowSeconds - LastFlushSeconds >= FMath::Max(0.0, Settings.FlushIntervalSeconds)))
 	{
 		Flush();
+	}
+}
+
+void FClient::CheckRecordingClosed()
+{
+	if (bRecordingRegistered && !bRecordingClosed
+		&& IFileManager::Get().FileExists(*(Settings.Recording->TelemetryDirectory / TEXT("closed.json"))))
+	{
+		if (IsCollecting())
+		{
+			// Records captured while the recording was open go out with it, ahead of its marker.
+			SendBufferedRecords();
+		}
+		FinishRecording();
+	}
+}
+
+void FClient::SendBufferedRecords()
+{
+	TOptional<FActivitySample> Sample;
+	if (ActivitySource)
+	{
+		Sample = ActivitySource();
+	}
+	PollState(Clock(), Sample.GetPtrOrNull());
+	// A check ends one lifetime of an ID, so lifetimes waiting behind it need more checks. Stop when
+	// nothing waits or the queue refuses the next removal.
+	const int32 MaxChecks = PendingRemovals.Num() + 2;
+	for (int32 Check = 0; Check < MaxChecks; ++Check)
+	{
+		const int32 Waiting = PendingRemovals.Num();
+		if (!CheckObjects() || (Waiting > 0 && PendingRemovals.Num() >= Waiting))
+		{
+			break;
+		}
+	}
+	if (!PendingRemovals.IsEmpty())
+	{
+		// Removals that never reach the queue are counted, so the completion marker reports them.
+		const int32 Abandoned = PendingRemovals.Num();
+		PendingRemovals.Reset();
+		NoteDropped(Abandoned, ActiveRecording().IsSet() ? Abandoned : 0);
 	}
 }
 
@@ -1026,32 +1066,7 @@ void FClient::Shutdown(double TimeoutSeconds)
 	TickerHandle.Reset();
 	if (IsCollecting())
 	{
-		// Send state changes since the last poll, then registrations, removals and object state
-		// changes that are waiting for the next check.
-		TOptional<FActivitySample> Sample;
-		if (ActivitySource)
-		{
-			Sample = ActivitySource();
-		}
-		PollState(Clock(), Sample.GetPtrOrNull());
-		// A check ends one lifetime of an ID, so lifetimes waiting behind it need more checks. Stop
-		// when nothing waits or the queue refuses the next removal.
-		const int32 MaxChecks = PendingRemovals.Num() + 2;
-		for (int32 Check = 0; Check < MaxChecks; ++Check)
-		{
-			const int32 Waiting = PendingRemovals.Num();
-			if (!CheckObjects() || (Waiting > 0 && PendingRemovals.Num() >= Waiting))
-			{
-				break;
-			}
-		}
-		if (!PendingRemovals.IsEmpty())
-		{
-			// Removals that never reach the queue are counted, so the completion marker reports them.
-			const int32 Abandoned = PendingRemovals.Num();
-			PendingRemovals.Reset();
-			NoteDropped(Abandoned, ActiveRecording().IsSet() ? Abandoned : 0);
-		}
+		SendBufferedRecords();
 	}
 	bShutdown = true;
 	FinishRecording();

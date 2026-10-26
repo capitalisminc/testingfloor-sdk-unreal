@@ -822,8 +822,6 @@ bool FTestingFloorCompletionRecordsTest::RunTest(const FString& Parameters)
 	TF_REQUIRE_TRUE(Transport->Complete(200), "Recovery records delivered");
 
 	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
-	Volume = 3;
-	Crate = FVector(100.0, 0.0, 0.0);
 	Client->Tick(3.0);
 	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 3, "Closing the recording sends the marker in its own request");
 	const TSharedPtr<FJsonObject> Body = Parse(Transport->Bodies.Last());
@@ -834,6 +832,9 @@ bool FTestingFloorCompletionRecordsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Marker"), Marker->GetStringField(TEXT("$name")), FString(TEXT("$tf_telemetry_complete")));
 	TestEqual(TEXT("The marker takes the next seq"), Seq(Marker), LastSeq + 1);
 	TestEqual(TEXT("Dropped state and object records count toward dropped_events"), Marker->GetIntegerField(TEXT("dropped_events")), 2);
+	Volume = 3;
+	Crate = FVector(100.0, 0.0, 0.0);
+	Client->Tick(4.0);
 	States = Records(*Client, TEXT("$tf_state"));
 	Objects = Records(*Client, TEXT("$tf_objects"));
 	TF_REQUIRE_TRUE(States.Num() == 1 && Objects.Num() == 1, "State and objects continue after the recording closes");
@@ -841,6 +842,55 @@ bool FTestingFloorCompletionRecordsTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Objects after closure omit the recording"), HasRecording(Objects[0]));
 	TestTrue(TEXT("Records after the marker follow it"), Seq(States[0]) > Seq(Marker) && Seq(Objects[0]) > Seq(Marker));
 	TF_REQUIRE_TRUE(Transport->Complete(200), "Marker acknowledged");
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorCloseBufferedTest, "TestingFloor.Sdk.Schema2.RecordingCloseSendsBufferedRecords", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorCloseBufferedTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	IFileManager::Get().MakeDirectory(*Directory, true);
+	auto ClientSettings = Settings();
+	TestingFloor::FRecordingContext Recording;
+	Recording.RecordingUUID = TEXT("example-recording");
+	Recording.TelemetryDirectory = Directory;
+	ClientSettings.Recording = Recording;
+	const auto Transport = MakeShared<FTransport>();
+	const auto Client = Create(ClientSettings, Transport);
+	int32 Volume = 1;
+	Client->SetStateProvider([&Volume](TestingFloor::FProperties& State) { State.Set(TEXT("pref.volume"), Volume); });
+	const uint64 Crate = Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }, TEXT("crate"));
+	Client->Tick(0.0);
+	// Both change before the next state poll and object check, and then the recording closes.
+	Volume = 2;
+	Client->RemoveObject(Crate, TEXT("destroyed"));
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Client->Tick(0.1);
+	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 1, "Recording records flush before the marker");
+	TF_REQUIRE_TRUE(Transport->Complete(200), "Recording records acknowledged");
+	Client->Tick(0.2);
+	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 2, "Marker follows");
+	TArray<TSharedPtr<FJsonObject>> Sent;
+	for (const FString& Text : Transport->Bodies)
+	{
+		const TSharedPtr<FJsonObject> Body = Parse(Text);
+		TF_REQUIRE(Body.Get(), "Valid batch JSON");
+		for (const TSharedPtr<FJsonValue>& Value : Body->GetArrayField(TEXT("events")))
+		{
+			Sent.Add(Value->AsObject());
+		}
+	}
+	const TSharedPtr<FJsonObject>* Removal = Sent.FindByPredicate([](const TSharedPtr<FJsonObject>& Record) { return Record->HasField(TEXT("removed.id")); });
+	const TSharedPtr<FJsonObject>* Change = Sent.FindByPredicate([](const TSharedPtr<FJsonObject>& Record) { return Record->GetStringField(TEXT("$name")) == TEXT("$tf_state") && !IsKeyframe(Record); });
+	const TSharedPtr<FJsonObject>* Marker = Sent.FindByPredicate([](const TSharedPtr<FJsonObject>& Record) { return Record->GetStringField(TEXT("$name")) == TEXT("$tf_telemetry_complete"); });
+	TF_REQUIRE_TRUE(Removal && Change && Marker, "Removal, state change and marker were all sent");
+	TestTrue(TEXT("The buffered removal keeps the recording"), HasRecording(*Removal));
+	TestTrue(TEXT("The buffered state change keeps the recording"), HasRecording(*Change));
+	TestTrue(TEXT("Both precede the marker"), Seq(*Removal) < Seq(*Marker) && Seq(*Change) < Seq(*Marker));
+	TestEqual(TEXT("Nothing was dropped"), (*Marker)->GetIntegerField(TEXT("dropped_events")), 0);
+	Client->Shutdown(0.0);
 	IFileManager::Get().DeleteDirectory(*Directory, false, true);
 	return true;
 }
