@@ -358,6 +358,31 @@ bool FTestingFloorNonFinitePositionTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorReplacementRemovedTest, "TestingFloor.Sdk.Schema2.ReplacementRemovedBeforeCheck", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorReplacementRemovedTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const auto Client = Create(Settings());
+	const uint64 Old = Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }, TEXT("crate"));
+	Client->Tick(0.0);
+	FVector Replacement(500.0, 0.0, 0.0);
+	Client->RemoveObject(Old, TEXT("destroyed"));
+	const uint64 New = Client->TrackObject(TEXT("crate"), [&Replacement] { return TOptional<FVector>(Replacement); }, TEXT("crate"));
+	Replacement = FVector(600.0, 0.0, 0.0);
+	Client->RemoveObject(New, TEXT("destroyed"));
+	Client->Tick(0.25);
+	Client->Tick(0.5);
+	Client->Tick(0.75);
+	const auto Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(Objects.Num() == 3, "Registration, then one record per lifetime's end");
+	TestEqual(TEXT("The old path ends alone"), Array(Objects[1], TEXT("removed.id")), FString(TEXT("crate")));
+	TestEqual(TEXT("The old removal holds only the old position"), Array(Objects[1], TEXT("sample.x")), FString(TEXT("0")));
+	TestEqual(TEXT("The replacement's samples go out with its own removal"), Array(Objects[2], TEXT("sample.x")), FString(TEXT("500,600")));
+	TestEqual(TEXT("The replacement ends in the later record"), Array(Objects[2], TEXT("removed.id")), FString(TEXT("crate")));
+	TestTrue(TEXT("Lifetimes are ordered"), Seq(Objects[1]) < Seq(Objects[2]));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorObjectSamplingTest, "TestingFloor.Sdk.Schema2.ObjectSamplingAndRemoval", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorObjectSamplingTest::RunTest(const FString& Parameters)
 {
@@ -456,8 +481,8 @@ bool FTestingFloorObjectFirstSampleTest::RunTest(const FString& Parameters)
 	Client->Tick(0.0);
 	auto Objects = Records(*Client, TEXT("$tf_objects"));
 	TF_REQUIRE_TRUE(Objects.Num() == 1, "One record for the first check");
-	TestEqual(TEXT("Registration position first, then a move of 0.25 m in the same record"), Array(Objects[0], TEXT("sample.id")), FString(TEXT("drone,drone,cart,rocket,rocket")));
-	TestEqual(TEXT("A smaller move keeps only the registration position; a removed object gets a start and an end"), Array(Objects[0], TEXT("sample.x")), FString(TEXT("0,30,0,0,100")));
+	TestEqual(TEXT("Registration position first, then a move of 0.25 m in the same record"), Array(Objects[0], TEXT("sample.id")), FString(TEXT("rocket,rocket,drone,drone,cart")));
+	TestEqual(TEXT("A smaller move keeps only the registration position; a removed object gets a start and an end"), Array(Objects[0], TEXT("sample.x")), FString(TEXT("0,100,0,30,0")));
 	TestEqual(TEXT("Removal follows its samples"), Array(Objects[0], TEXT("removed.reason")), FString(TEXT("exploded")));
 	Cart = FVector(25.0, 0.0, 0.0);
 	Client->Tick(0.25);

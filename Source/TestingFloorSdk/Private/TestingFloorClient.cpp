@@ -1280,10 +1280,28 @@ void FClient::CheckObjects()
 	Objects.GetKeys(Tokens);
 	Tokens.Sort();
 	TArray<FObjectRows> Rows;
+	// Readers apply a record's samples before its removals, so a check ends at most one lifetime of an
+	// ID. A later lifetime's removal waits for the next check, after the earlier path has ended.
+	TSet<FString> EndedIDs;
+	const auto TakeRemovals = [this, &Rows, &EndedIDs] {
+		TArray<FObjectRows> Carried;
+		for (FObjectRows& Removal : PendingRemovals)
+		{
+			if (EndedIDs.Contains(Removal.ID))
+			{
+				Carried.Add(MoveTemp(Removal));
+				continue;
+			}
+			EndedIDs.Add(Removal.ID);
+			Rows.Add(MoveTemp(Removal));
+		}
+		PendingRemovals = MoveTemp(Carried);
+	};
+	TakeRemovals();
 	for (const uint64 Token : Tokens)
 	{
 		FTrackedObject& Object = Objects[Token];
-		if (HasPendingRemoval(Object.ID))
+		if (HasPendingRemoval(Object.ID) || EndedIDs.Contains(Object.ID))
 		{
 			// A reused ID waits until the old path's removal is queued, so a reader ends the old path first.
 			continue;
@@ -1334,14 +1352,14 @@ void FClient::CheckObjects()
 			Rows.Add(MoveTemp(Changes));
 		}
 	}
-	Rows.Append(MoveTemp(PendingRemovals));
-	PendingRemovals.Reset();
+	TakeRemovals();
 	QueueObjectRecords(Rows, bKeyframe);
 }
 
 void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
 {
 	const FDateTime Timestamp = Clock();
+	TArray<FObjectRows> Refused;
 	for (int32 Start = 0, End = 0; Start < Rows.Num(); Start = End)
 	{
 		// Keep each object's rows together so its state never arrives before its first sample.
@@ -1409,11 +1427,13 @@ void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
 			{
 				if (!Rows[Index].RemovedReason.IsEmpty())
 				{
-					PendingRemovals.Add(Rows[Index]);
+					Refused.Add(Rows[Index]);
 				}
 			}
 		}
 	}
+	// Refused removals are earlier lifetimes than any carried to the next check, so they go first.
+	PendingRemovals.Insert(MoveTemp(Refused), 0);
 }
 
 EState FClient::GetState() const
