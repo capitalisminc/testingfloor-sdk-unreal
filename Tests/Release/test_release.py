@@ -23,7 +23,7 @@ class ReleaseTests(unittest.TestCase):
         (self.root / ".env").write_text("LOCAL_ONLY=example")
         (self.root / ".git").mkdir()
         (self.root / ".git" / "config").write_text("local metadata")
-        (self.root / "Binaries").mkdir()
+        (self.root / "Binaries").mkdir(exist_ok=True)
         (self.root / "Binaries" / "example.bin").write_bytes(b"generated")
         output = Path(self.temp.name) / "sdk.zip"
         package.package(self.root, output)

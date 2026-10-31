@@ -38,9 +38,12 @@ Client = TestingFloor::FClient::Create(Settings);
 
 The default factory ticks on Unreal's core ticker, including during pause, and
 reads the current recorder handoff. It fills engine, OS, and locale metadata.
-Collection is off in the editor by default: set `bEnableInEditor` to opt in during
-integration. Automation always disables collection. Missing credentials or an
-empty endpoint disable sends. Keep real write keys out of source control.
+Ordinary editor collection is off by default. `bEnableInEditorWhileRecording`
+defaults to true, so a live desktop recording can temporarily enable collection
+without enabling ordinary editor analytics. `bEnableInEditor` still opts into
+always-on editor collection. Set both options false for no editor telemetry.
+Recording never overrides `bEnabled=false`, automation restrictions, missing
+credentials, or an empty endpoint. Keep real write keys out of source control.
 
 Supply optional `DeviceID` (a stable installation UUID persisted by your game),
 `UserID` (your profile identity), `AppVersion`, and other metadata in `FSettings`.
@@ -59,10 +62,51 @@ objects alive or use weak pointers in callbacks. Shutdown stops the automatic
 ticker and closes the client; create a new client for the next Play run.
 
 Custom transports and deterministic hosts can use the advanced
-`Create(Settings, Environment, Transport, Clock)` overload. That overload does
-not register a ticker or discover host metadata. Call `Tick()` or
-`Tick(monotonicSeconds)` yourself, including during pause, and pass the real
-automation flag when a custom environment is used.
+`Create(Settings, Environment, Transport, Clock, RecordingSource)` overload.
+Call `Tick()` or `Tick(monotonicSeconds)` yourself, including during pause, and
+pass the real automation flag. This overload does not sample gameplay through an
+automatic ticker or discover host metadata. Without an injected
+`RecordingSource`, it installs a separate context-only monitor in editor,
+standalone and packaged hosts, so a host that gates its gameplay tick on
+`GetState()` can still attach a recording.
+With an injected source, call `PollRecordingContext()` or `Tick()` from your host;
+tests can drive the clock and context without reading the real project handoff.
+
+## Record an existing editor Play run
+
+The SDK checks the selected project's recording handoff every 250 ms while Play
+is running, including when collection is dormant or gameplay is paused. Starting
+recording can attach to an existing Play run, and stopping and starting another
+recording does not require another Play boot. The Play-session ID stays stable;
+each event captures its own recording UUID before queueing.
+
+The desktop app publishes a renewable lease with `lease_version:1`,
+`telemetry_requested:true`, `lease_expires_at_unix_ms`, and `telemetry_directory`.
+Only an unexpired requested lease can enable recording-only editor collection.
+A static legacy handoff can still associate events when ordinary editor
+collection is allowed, but cannot enable editor-off collection. A lease sidecar
+supersedes a launch argument so a new recording can replace the old one.
+
+Attachment registers the Play run and sends full state and live-object
+keyframes. Stop closes the association, drains accepted records, and sends its
+completion marker before the next recording's records. Lease expiry suspends
+new recording telemetry; renewal starts from fresh keyframes and preserves
+`interrupted:true` in local status and final completion. A final completed pair
+of recording UUID and Play-session ID never reopens.
+
+When supplied, `editor_pid` must match the current process for an interactive
+editor. Standalone child Play processes use the project-scoped handoff without
+that direct PID comparison; hosts must scope which project/children they launch.
+The SDK does not collect gameplay from editor-only work outside a Play run.
+
+`<session-id>.status.json` in the telemetry directory reports attachment,
+suspension, closure or the policy/configuration preventing attachment. Its
+capabilities are `recording_lease_v1` and `dynamic_recording_attachment`.
+This acknowledges local SDK participation, not warehouse delivery. Use the
+existing completion barrier to determine delivery. No recording modifies saved
+SDK settings. `GetRecordingContext()` exposes only an attached telemetry
+association. Use the fresh `GetRecordingHandoff()` for independent capture
+policy such as QR suppression, even when telemetry is disabled or unconfigured.
 
 ## Track Events
 
@@ -115,7 +159,7 @@ key that is no longer supplied is sent as `null`. `SetState` values override the
 provider's value for the same key and accept the same types as `FProperties`.
 
 A keyframe repeats every current value. The SDK sends one at the start of the
-play session (which is also the start of its recording), every 5 minutes, and
+play session, every recording attachment or renewal, every 5 minutes, and
 after it drops any record. The SDK's own `viewport.width`, `viewport.height` and
 `camera.fov_axis` are state. Testing Floor shows each event with the state that
 was current at that moment. A game without a state provider keeps all of its
@@ -153,8 +197,9 @@ Samples, state changes and removals from one check are batched into
 rounded to 1 cm and at most 300 samples per record. Records copy the
 `game_level.*` values of the most recent event. `FSettings::MaxTrackedObjects`
 (default 256) limits live objects; further registrations return 0 and log one
-warning. With collection disabled, `TrackObject` returns 0 and nothing is
-sampled. Handles of 0 or removed objects do nothing.
+warning. While editor collection is dormant, registrations remain available without
+sampling; each recording starts from the live objects. Disabled/unconfigured
+integrations return 0. Handles of 0 or removed objects do nothing.
 
 ## Player & Camera Context
 
@@ -221,9 +266,10 @@ an optional reason, then resets the movement baseline.
 
 Recording identity is separate from the client's fresh per-play session ID.
 `FRecordingContext::FromCommandLine` accepts `--testing-floor={"recording_uuid":"..."}`.
-`FRecordingContext::Resolve` tries the command line first, then sidecar JSON
-contents supplied by your game. The recorder owns sidecar file lifetime.
-Handoffs with a timestamp more than 12 hours old are ignored.
+`FRecordingContext::Resolve` prefers a versioned lease sidecar, then falls back
+to the command line and legacy sidecar JSON supplied by your game. The desktop
+app owns sidecar file lifetime. Static handoffs older than 12 hours are ignored;
+a live renewable lease remains valid beyond that static age limit.
 
 For external video capture, `TestingFloor/TestingFloorQr.h` provides
 `FQrPolicy`, `FQrHeartbeat`, and QR pixel generation. Your game renders the

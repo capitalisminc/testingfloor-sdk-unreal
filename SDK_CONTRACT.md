@@ -16,9 +16,46 @@ For setup and code examples, start with the README in the SDK you use.
   Optional fields are `playtest_id`, `suppress_qr` (defaults true), and `created_at_unix_ms`.
 - Editor sidecars are `Library/TestingFloor/recording-payload.json` for Unity and
   `Saved/TestingFloor/recording-payload.json` for Unreal. The recorder owns their lifetime.
-- A valid launch argument takes precedence over a sidecar. Malformed or expired
-  arguments permit sidecar fallback. Timestamped handoffs older than 12 hours are ignored.
+- A versioned editor recording lease sidecar supersedes the launch argument,
+  including when expired, so expiry cannot revive an old launch association.
+  Otherwise a valid launch argument takes precedence over legacy sidecars.
+  Malformed or expired arguments permit sidecar fallback. Timestamped legacy
+  handoffs older than 12 hours are ignored.
 - Old recorder session aliases and `session-payload.json` are not supported.
+
+## Editor collection policy and dynamic recording
+
+Ordinary editor collection defaults off (`enableInEditor` / `bEnableInEditor`).
+Recording-only collection defaults on (`enableInEditorWhileRecording` /
+`bEnableInEditorWhileRecording`). Both false means Never; the ordinary editor
+switch true means Always. Master disable, force-disable where provided,
+automation restrictions and missing configuration still prevent collection.
+
+A recording-only editor association requires the desktop app's live lease:
+`lease_version:1`, `telemetry_requested:true` and a future
+`lease_expires_at_unix_ms`, alongside the existing recording identity and
+telemetry directory. Legacy static payloads do not override editor-off policy.
+Discovery continues independently of collection and gameplay clocks in editor,
+standalone and packaged hosts. A valid
+recording can attach during an already-running Play session; successive
+recordings retain the Play-session ID while changing the recording UUID.
+
+Each attachment/renewal starts state and object keyframes and resets movement
+baselines. Dormant integrations retain providers and object handles without
+sampling. Detach stops admitting recording events, while data already accepted
+can drain afterward. Queued records never acquire the next recording's UUID.
+Interactive editors validate an optional `editor_pid`; standalone child Play is
+project-scoped without a direct editor PID comparison. Observing a live capture
+handoff is independent of telemetry attachment: QR suppression still applies
+when collection is blocked by policy or missing configuration. An expired or
+closed handoff cannot keep suppressing the marker.
+
+An expired lease suspends association and marks an interruption. It does not
+emit a final completion until authoritative closure, replacement, or Play exit.
+Renewal can resume an uncompleted pair and requires fresh keyframes. Completed
+recording/Play-session pairs never reopen. Local status is written separately
+as `<session-id>.status.json` with recording/session identity, engine/SDK version,
+state, reason, capabilities, sticky interruption and `updated_at_unix_ms`.
 
 ## Recording delivery completion
 
@@ -34,7 +71,9 @@ shutting down a Play run stops attaching new events to that recording and queues
 `$tf_telemetry_complete`. The marker carries the recording UUID, Play-session ID
 and recording-scoped `dropped_events`. It owns a separate request, sent only after preceding
 requests succeed or are explicitly counted as dropped. It bypasses the gameplay
-queue capacity. A nonzero dropped count means incomplete telemetry.
+queue capacity. A nonzero dropped count or `interrupted:true` means incomplete telemetry.
+Drop and completion bookkeeping is scoped by recording UUID and Play-session ID,
+including when data for an earlier recording is still draining.
 
 The receiver acknowledges batches only after its warehouse write succeeds.
 Seeing every registered participant's marker in the warehouse therefore closes

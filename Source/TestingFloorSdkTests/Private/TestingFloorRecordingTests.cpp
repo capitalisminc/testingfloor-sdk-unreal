@@ -83,6 +83,9 @@ bool FTestingFloorRecordingResolutionTest::RunTest(const FString& Parameters)
 	const FString Stale = FString::Printf(TEXT(R"TF({"recording_uuid":"stale","created_at_unix_ms":%lld})TF"), Boundary - 1);
 	TestTrue(TEXT("Exactly twelve-hour-old payload remains valid to the millisecond"), TestingFloor::FRecordingContext::Parse(Fresh, Now).IsSet());
 	TestFalse(TEXT("One millisecond beyond recorder lifetime is stale"), TestingFloor::FRecordingContext::Parse(Stale, Now).IsSet());
+	const FString RenewedOldLease = FString::Printf(TEXT(R"TF({"recording_uuid":"renewed","created_at_unix_ms":%lld,"lease_version":1,"telemetry_requested":true,"lease_expires_at_unix_ms":%lld})TF"), Boundary - 1, NowMilliseconds + 5000);
+	TestTrue(TEXT("A verifiably fresh lease outlives the static handoff age limit"), TestingFloor::FRecordingContext::Parse(RenewedOldLease, Now).IsSet());
+	TestFalse(TEXT("An expired lease cannot bypass the static age limit"), TestingFloor::FRecordingContext::Parse(RenewedOldLease, Now + FTimespan::FromSeconds(5)).IsSet());
 	TestTrue(TEXT("Outlying future timestamps do not overflow date construction"), TestingFloor::FRecordingContext::Parse(TEXT(R"TF({"recording_uuid":"future","created_at_unix_ms":9223372036854775807})TF"), Now).IsSet());
 	const TArray<FString> Sidecars{ TEXT("invalid-json"), Stale, Fresh, TEXT(R"TF({"recording_uuid":"lower-priority"})TF") };
 	for (const FString& CommandLine : { FString(), FString(TEXT("--testing-floor=invalid-json")), TEXT("--testing-floor=") + Stale })
@@ -267,6 +270,527 @@ bool FTestingFloorRecordingCompletionTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Recording-associated losses remain explicit"), LossBody->GetArrayField(TEXT("events"))[0]->AsObject()->GetIntegerField(TEXT("dropped_events")), 1);
 	LossTransport->Reply(200);
 	LossClient->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+namespace TestingFloorRecordingTests
+{
+class FCapturingTransport final : public TestingFloor::ITransport
+{
+public:
+	TArray<FString> Bodies;
+	void Send(const FString&, const FString& Body, TFunction<void(int32, bool)> Completion) override
+	{
+		Bodies.Add(Body);
+		Completion(200, true);
+	}
+};
+
+TestingFloor::FRecordingContext Lease(const FString& ID, const FString& Directory, FDateTime Now)
+{
+	TestingFloor::FRecordingContext Result;
+	Result.RecordingUUID = ID;
+	Result.TelemetryDirectory = Directory;
+	Result.LeaseVersion = 1;
+	Result.LeaseExpiresAtUnixMilliseconds = Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond() + 5000;
+	Result.bTelemetryRequested = true;
+	IFileManager::Get().MakeDirectory(*Directory, true);
+	return Result;
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecordingOnlyPolicyTest, "TestingFloor.Sdk.RecordingOnlyEditorPolicy", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRecordingOnlyPolicyTest::RunTest(const FString& Parameters)
+{
+	const FDateTime Now(2026, 1, 1);
+	auto Settings = TestingFloorRecordingTests::Settings();
+	TestTrue(TEXT("Recording-only editor option defaults on"), Settings.bEnableInEditorWhileRecording);
+	TestFalse(TEXT("Ordinary editor Play remains off"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
+	TestingFloor::FRecordingContext Recording;
+	Recording.RecordingUUID = TEXT("example-recording");
+	Settings.Recording = Recording;
+	TestFalse(TEXT("A legacy static payload cannot override editor-off policy"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
+	Recording.LeaseVersion = 1;
+	Recording.bTelemetryRequested = true;
+	Recording.LeaseExpiresAtUnixMilliseconds = Now.ToUnixTimestamp() * 1000 + 5000;
+	Settings.Recording = Recording;
+	TestTrue(TEXT("A live requested recording permits editor collection"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
+	TestFalse(TEXT("Expired lease cannot permit collection"), TestingFloor::ShouldCollect(Settings, { true, false }, Now + FTimespan::FromSeconds(5)));
+	Settings.Recording->bTelemetryRequested = false;
+	TestFalse(TEXT("The desktop telemetry request is required"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
+	Settings.Recording = Recording;
+	Settings.bEnableInEditorWhileRecording = false;
+	TestFalse(TEXT("Never policy is an explicit opt-out"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
+	Settings.bEnableInEditor = true;
+	TestTrue(TEXT("Always policy permits ordinary collection"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
+	Settings.bEnabled = false;
+	TestFalse(TEXT("Recording never overrides master disable"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
+	Settings.bEnabled = true;
+	TestFalse(TEXT("Recording never overrides automation"), TestingFloor::ShouldCollect(Settings, { true, true }, Now));
+	Settings.WriteKey.Empty();
+	TestFalse(TEXT("Recording never supplies missing credentials"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
+	const FString LeaseJson = FString::Printf(TEXT(R"TF({"recording_uuid":"new-recording","lease_version":1,"telemetry_requested":true,"lease_expires_at_unix_ms":%lld})TF"), Recording.LeaseExpiresAtUnixMilliseconds);
+	const auto Resolved = TestingFloor::FRecordingContext::Resolve(TEXT(R"TF(--testing-floor={"recording_uuid":"old-recording"})TF"), TArray<FString>{ LeaseJson }, Now);
+	TF_REQUIRE_TRUE(Resolved.IsSet(), "Editor lease parsed");
+	TestEqual(TEXT("Editor lease supersedes the old launch context"), Resolved->RecordingUUID, FString(TEXT("new-recording")));
+	TestTrue(TEXT("Lease fields survive parsing"), Resolved->HasActiveLease(Now));
+	const auto Expired = TestingFloor::FRecordingContext::Resolve(TEXT(R"TF(--testing-floor={"recording_uuid":"old-recording"})TF"), TArray<FString>{ LeaseJson }, Now + FTimespan::FromSeconds(6));
+	TF_REQUIRE_TRUE(Expired.IsSet(), "Expired lease remains observable for suspension");
+	TestEqual(TEXT("Expiry cannot revive the launch context"), Expired->RecordingUUID, FString(TEXT("new-recording")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorDynamicRecordingTest, "TestingFloor.Sdk.DynamicEditorRecordingLifecycle", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorDynamicRecordingTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current;
+	const auto Transport = MakeShared<TestingFloorRecordingTests::FCapturingTransport>();
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, Transport,
+		[&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	const FString PlaySessionID = Client->GetPlaySessionID();
+	int32 PositionReads = 0;
+	const uint64 Object = Client->TrackObject(TEXT("object"), [&PositionReads] { ++PositionReads; return TOptional<FVector>(FVector(100, 200, 300)); }, TEXT("example-object"));
+	TestTrue(TEXT("Dormant integration retains an object registration"), Object != 0);
+	TestEqual(TEXT("Dormant registration does not sample gameplay"), PositionReads, 0);
+	TestEqual(TEXT("A Play run starts dormant"), Client->GetState(), TestingFloor::EState::Disabled);
+	TestFalse(TEXT("Unrecorded gameplay is not queued"), Client->Track(TEXT("before-recording")));
+	Client->SetState(TEXT("example-state"), TEXT("current"));
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-a"), Directory / TEXT("a"), Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.0);
+	TestEqual(TEXT("Recording starts without restarting Play"), Client->GetState(), TestingFloor::EState::Ok);
+	TF_REQUIRE_TRUE(Client->GetRecordingContext().IsSet(), "Active recording is exposed");
+	TestEqual(TEXT("Active identity"), Client->GetRecordingContext()->RecordingUUID, FString(TEXT("recording-a")));
+	TestTrue(TEXT("Participant registers before collection"), IFileManager::Get().FileExists(*(Current->TelemetryDirectory / (PlaySessionID + TEXT(".session")))));
+	const auto FirstRecords = Client->GetQueuedEvents();
+	TestTrue(TEXT("Attach queues a full state keyframe before any gameplay"), FirstRecords.ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_state") && Event.bKeyframe; }));
+	TestTrue(TEXT("Attach queues registered-object keyframes"), FirstRecords.ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_objects") && Event.bKeyframe; }));
+	TestTrue(TEXT("Recorded gameplay is accepted"), Client->Track(TEXT("during-recording")));
+	Now += FTimespan::FromSeconds(6);
+	const int32 ReadsBeforeExpiry = PositionReads;
+	Client->Tick(6.0);
+	TestEqual(TEXT("Lease expiry suspends recording-only collection"), Client->GetState(), TestingFloor::EState::Disabled);
+	TestFalse(TEXT("Suspended context is not exposed"), Client->GetRecordingContext().IsSet());
+	TestEqual(TEXT("Expired recording does not sample objects"), PositionReads, ReadsBeforeExpiry);
+	TestFalse(TEXT("Expired recording admits no gameplay"), Client->Track(TEXT("after-expiry")));
+	TestFalse(TEXT("Expiry is not a final completion"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_telemetry_complete"); }));
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-a"), Directory / TEXT("a"), Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(6.25);
+	TestEqual(TEXT("Fresh lease resumes the same recording"), Client->GetState(), TestingFloor::EState::Ok);
+	FString StatusJson;
+	FFileHelper::LoadFileToString(StatusJson, *(Current->TelemetryDirectory / (PlaySessionID + TEXT(".status.json"))));
+	const auto Status = TestingFloorRecordingTests::Parse(StatusJson);
+	TF_REQUIRE_TRUE(Status.IsValid(), "Status acknowledgement exists");
+	TestTrue(TEXT("Interruption remains visible after renewal"), Status->GetBoolField(TEXT("interrupted")));
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Current->TelemetryDirectory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(6.5);
+	TestFalse(TEXT("Closing detaches the exposed context"), Client->GetRecordingContext().IsSet());
+	TestEqual(TEXT("Closing restores dormant policy"), Client->GetState(), TestingFloor::EState::Disabled);
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-b"), Directory / TEXT("b"), Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(6.75);
+	TF_REQUIRE_TRUE(Client->GetRecordingContext().IsSet(), "Second recording attaches within the same Play run");
+	TestEqual(TEXT("Play identity stays stable"), Client->GetPlaySessionID(), PlaySessionID);
+	TestEqual(TEXT("Second recording gets its own context"), Client->GetRecordingContext()->RecordingUUID, FString(TEXT("recording-b")));
+	TestTrue(TEXT("Object registration survives stop and renewal"), Client->GetTrackedObjectCount() == 1);
+	TestTrue(TEXT("Second recording queues independent state keyframes"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_state") && Event.bKeyframe && Event.Recording.IsSet() && Event.Recording->RecordingUUID == TEXT("recording-b"); }));
+	TestTrue(TEXT("Queued A snapshots retain their recording"), FirstRecords[0].Recording.IsSet() && FirstRecords[0].Recording->RecordingUUID == TEXT("recording-a"));
+	Client->Shutdown(0.0);
+	for (int32 Attempt = 0; Attempt < 10 && Client->GetPendingEventCount() > 0; ++Attempt) Client->Flush();
+	bool bFoundInterruptedCompletion = false;
+	for (const FString& BodyJson : Transport->Bodies)
+	{
+		const auto ParsedBody = TestingFloorRecordingTests::Parse(BodyJson);
+		TF_REQUIRE_TRUE(ParsedBody.IsValid(), "Captured batch parses as JSON");
+		for (const auto& Value : ParsedBody->GetArrayField(TEXT("events")))
+		{
+			const auto Event = Value->AsObject();
+			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_telemetry_complete") && Event->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("recording_uuid")) == TEXT("recording-a"))
+			{
+				bFoundInterruptedCompletion = Event->GetBoolField(TEXT("interrupted"));
+			}
+		}
+	}
+	TestTrue(TEXT("Final completion carries interruption evidence"), bFoundInterruptedCompletion);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecordingDropIsolationTest, "TestingFloor.Sdk.RecordingDropCountsAreIsolated", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRecordingDropIsolationTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current;
+	auto Settings = TestingFloorRecordingTests::Settings();
+	Settings.QueueMaxEvents = 2;
+	const auto Transport = MakeShared<TestingFloorRecordingTests::FCapturingTransport>();
+	const auto Client = TestingFloor::FClient::Create(Settings, { true, false }, Transport, [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-a"), Directory / TEXT("a"), Now);
+	Client->Tick(0.0);
+	Client->Track(TEXT("accepted-a"));
+	TestFalse(TEXT("A overflow is counted"), Client->Track(TEXT("overflow-a")));
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Current->TelemetryDirectory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.25);
+	const int32 ADrops = Client->GetDroppedEventCount();
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-b"), Directory / TEXT("b"), Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.5);
+	for (int32 Index = 0; Index < 5; ++Index) Client->Track(TEXT("b-event"));
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Current->TelemetryDirectory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.75);
+	for (int32 Attempt = 0; Attempt < 10 && Client->GetPendingEventCount() > 0; ++Attempt) Client->Flush();
+	TMap<FString, int32> Drops;
+	for (const FString& BodyJson : Transport->Bodies)
+	{
+		const auto ParsedBody = TestingFloorRecordingTests::Parse(BodyJson);
+		TF_REQUIRE_TRUE(ParsedBody.IsValid(), "Captured batch parses as JSON");
+		for (const auto& Value : ParsedBody->GetArrayField(TEXT("events")))
+		{
+			const auto Event = Value->AsObject();
+			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_telemetry_complete")) Drops.Add(Event->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("recording_uuid")), Event->GetIntegerField(TEXT("dropped_events")));
+		}
+	}
+	TestEqual(TEXT("A marker cannot inherit B losses"), Drops.FindRef(TEXT("recording-a")), ADrops);
+	TestTrue(TEXT("B has its own completion marker"), Drops.Contains(TEXT("recording-b")));
+	TestEqual(TEXT("Per-recording counts account for all observed losses"), Drops.FindRef(TEXT("recording-a")) + Drops.FindRef(TEXT("recording-b")), Client->GetDroppedEventCount());
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecordingCloseReentryTest, "TestingFloor.Sdk.RecordingCloseProviderReentry", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRecordingCloseReentryTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	const auto Transport = MakeShared<TestingFloorRecordingTests::FCapturingTransport>();
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, Transport, [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	bool bEmitDuringClose = false;
+	Client->SetActivitySource([&Client, &bEmitDuringClose] {
+		if (bEmitDuringClose)
+		{
+			bEmitDuringClose = false;
+			Client->Track(TEXT("provider-close-event"));
+		}
+		return TestingFloor::FActivitySample();
+	});
+	Client->Tick(0.0);
+	bEmitDuringClose = true;
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.25);
+	for (int32 Attempt = 0; Attempt < 10 && Client->GetPendingEventCount() > 0; ++Attempt) Client->Flush();
+	bool bFoundCallbackEvent = false;
+	int32 Markers = 0;
+	bool bSeenMarker = false;
+	for (const FString& BodyJson : Transport->Bodies)
+	{
+		const auto ParsedBody = TestingFloorRecordingTests::Parse(BodyJson);
+		TF_REQUIRE_TRUE(ParsedBody.IsValid(), "Captured batch parses as JSON");
+		for (const auto& Value : ParsedBody->GetArrayField(TEXT("events")))
+		{
+			const auto Event = Value->AsObject();
+			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_telemetry_complete"))
+			{
+				++Markers;
+				bSeenMarker = true;
+			}
+			else if (Event->GetStringField(TEXT("$name")) == TEXT("provider-close-event"))
+			{
+				bFoundCallbackEvent = true;
+				TestFalse(TEXT("Provider event precedes completion"), bSeenMarker);
+				TestEqual(TEXT("Provider event retains the closing recording"), Event->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("recording_uuid")), FString(TEXT("example-recording")));
+			}
+		}
+	}
+	TestTrue(TEXT("The provider event is accepted during buffered closure"), bFoundCallbackEvent);
+	TestEqual(TEXT("Closure is completed exactly once"), Markers, 1);
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRenewedLeaseHitchTest, "TestingFloor.Sdk.RenewedLeaseSurvivesGameThreadHitch", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRenewedLeaseHitchTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	Client->Tick(0.0);
+	Now += FTimespan::FromSeconds(6);
+	Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	Client->Tick(6.0);
+	FString StatusJson;
+	FFileHelper::LoadFileToString(StatusJson, *(Directory / (Client->GetPlaySessionID() + TEXT(".status.json"))));
+	const auto Status = TestingFloorRecordingTests::Parse(StatusJson);
+	TF_REQUIRE_TRUE(Status.IsValid(), "Renewed lease writes status");
+	TestEqual(TEXT("Renewed recording stays active across a game-thread hitch"), Client->GetState(), TestingFloor::EState::Ok);
+	TestFalse(TEXT("A fresh source is checked before declaring expiry"), Status->GetBoolField(TEXT("interrupted")));
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorTeleportRecordingBoundaryTest, "TestingFloor.Sdk.TeleportScopesRespectRecordingBoundaries", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorTeleportRecordingBoundaryTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current;
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	int32 PositionReads = 0;
+	Client->SetActivitySource([&PositionReads] { ++PositionReads; TestingFloor::FActivitySample Result; Result.PlayerPosition = FVector::ZeroVector; return Result; });
+	const uint64 DormantToken = Client->BeginTeleport(TEXT("before-recording"));
+	TestEqual(TEXT("Dormant teleport scope is rejected"), DormantToken, uint64(0));
+	Client->EndTeleport(DormantToken);
+	TestEqual(TEXT("Dormant teleport methods do not sample gameplay"), PositionReads, 0);
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-a"), Directory / TEXT("a"), Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.0);
+	const uint64 AToken = Client->BeginTeleport(TEXT("a-scope"));
+	TestTrue(TEXT("Active recording can begin a teleport scope"), AToken != 0);
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Current->TelemetryDirectory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.25);
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-b"), Directory / TEXT("b"), Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.5);
+	const int32 ReadsBeforeOldEnd = PositionReads;
+	Client->EndTeleport(AToken);
+	TestEqual(TEXT("Old scope cannot sample in a new recording"), PositionReads, ReadsBeforeOldEnd);
+	TestFalse(TEXT("A teleport cannot carry pre-recording positions into B"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("player_teleported"); }));
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRenewedLeaseCloseBufferTest, "TestingFloor.Sdk.RenewedLeaseClosesBufferedObjectsAfterHitch", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRenewedLeaseCloseBufferTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	const auto Transport = MakeShared<TestingFloorRecordingTests::FCapturingTransport>();
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, Transport, [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	const uint64 Object = Client->TrackObject(TEXT("object"), [] { return TOptional<FVector>(FVector::ZeroVector); }, TEXT("example-object"));
+	Client->Tick(0.0);
+	Client->RemoveObject(Object, TEXT("destroyed"));
+	Now += FTimespan::FromSeconds(6);
+	Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Client->Tick(6.0);
+	for (int32 Attempt = 0; Attempt < 10 && Client->GetPendingEventCount() > 0; ++Attempt) Client->Flush();
+	bool bFoundRemoval = false;
+	bool bCompleted = false;
+	for (const FString& BodyJson : Transport->Bodies)
+	{
+		const auto ParsedBody = TestingFloorRecordingTests::Parse(BodyJson);
+		TF_REQUIRE_TRUE(ParsedBody.IsValid(), "Captured batch parses as JSON");
+		for (const auto& Value : ParsedBody->GetArrayField(TEXT("events")))
+		{
+			const auto Event = Value->AsObject();
+			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_objects"))
+			{
+				const TArray<TSharedPtr<FJsonValue>>* RemovedIDs = nullptr;
+				if (Event->TryGetArrayField(TEXT("removed.id"), RemovedIDs) && RemovedIDs && !RemovedIDs->IsEmpty())
+				{
+					bFoundRemoval = true;
+					TestFalse(TEXT("Accepted removals precede completion"), bCompleted);
+					TestEqual(TEXT("Removal remains attached to the closing recording"), Event->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("recording_uuid")), FString(TEXT("example-recording")));
+				}
+			}
+			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_telemetry_complete"))
+			{
+				bCompleted = true;
+				TestFalse(TEXT("A continuously renewed lease is not interrupted at closure"), Event->GetBoolField(TEXT("interrupted")));
+			}
+		}
+	}
+	TestTrue(TEXT("Buffered object removal survives the hitch and closure"), bFoundRemoval);
+	TestTrue(TEXT("Recording completes after draining accepted objects"), bCompleted);
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorSuspendedLeasePollingTest, "TestingFloor.Sdk.SuspendedLeasePollingRemainsThrottled", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorSuspendedLeasePollingTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	int32 SourceReads = 0;
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; }, [&Current, &SourceReads](FDateTime) { ++SourceReads; return Current; });
+	Client->Tick(0.0);
+	Now += FTimespan::FromSeconds(6);
+	Client->Tick(6.0);
+	const int32 ReadsAtSuspension = SourceReads;
+	for (int32 Index = 0; Index < 100; ++Index) Client->Track(TEXT("ignored-while-suspended"));
+	TestEqual(TEXT("Repeated dormant calls do not repeatedly read an expired source"), SourceReads, ReadsAtSuspension);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(6.25);
+	TestEqual(TEXT("Suspended discovery resumes on the bounded cadence"), SourceReads, ReadsAtSuspension + 1);
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+namespace TestingFloorRecordingTests
+{
+class FScopedProjectHandoff
+{
+public:
+	FScopedProjectHandoff()
+	{
+		Path = FPaths::ProjectSavedDir() / TEXT("TestingFloor/recording-payload.json");
+		bExisted = IFileManager::Get().FileExists(*Path);
+		bReadable = !bExisted || FFileHelper::LoadFileToArray(Original, *Path);
+	}
+	~FScopedProjectHandoff()
+	{
+		if (!bWritten) return;
+		if (bExisted) FFileHelper::SaveArrayToFile(Original, *Path);
+		else IFileManager::Get().Delete(*Path, false, true);
+	}
+	bool Write(const FString& Json)
+	{
+		if (!bReadable) return false;
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
+		bWritten = true;
+		return FFileHelper::SaveStringToFile(Json, *Path);
+	}
+private:
+	FString Path;
+	TArray<uint8> Original;
+	bool bExisted = false;
+	bool bReadable = false;
+	bool bWritten = false;
+};
+
+FString LeaseJson(const TestingFloor::FRecordingContext& Recording)
+{
+	const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+	Value->SetStringField(TEXT("recording_uuid"), Recording.RecordingUUID);
+	Value->SetStringField(TEXT("telemetry_directory"), Recording.TelemetryDirectory);
+	Value->SetNumberField(TEXT("lease_version"), Recording.LeaseVersion);
+	Value->SetNumberField(TEXT("lease_expires_at_unix_ms"), Recording.LeaseExpiresAtUnixMilliseconds);
+	Value->SetBoolField(TEXT("telemetry_requested"), Recording.bTelemetryRequested);
+	FString Json;
+	FJsonSerializer::Serialize(Value, TJsonWriterFactory<>::Create(&Json));
+	return Json;
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorStandaloneDiscoveryTest, "TestingFloor.Sdk.StandaloneDiscoversSuccessiveProjectHandoffs", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorStandaloneDiscoveryTest::RunTest(const FString& Parameters)
+{
+	TestingFloorRecordingTests::FScopedProjectHandoff Payload;
+	TF_REQUIRE_TRUE(Payload.Write(TEXT("{}")), "Own a temporary project handoff while preserving its original bytes");
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	auto Settings = TestingFloorRecordingTests::Settings();
+	TestingFloor::FRecordingContext Legacy;
+	Legacy.RecordingUUID = TEXT("explicit-legacy-context");
+	Settings.Recording = Legacy;
+	const auto Client = TestingFloor::FClient::Create(Settings, { false, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; });
+	const FString PlayID = Client->GetPlaySessionID();
+	Client->PollRecordingContext();
+	TF_REQUIRE_TRUE(Client->GetRecordingContext().IsSet(), "Explicit legacy context survives an empty default source");
+	TestEqual(TEXT("Legacy context is retained until replaced"), Client->GetRecordingContext()->RecordingUUID, Legacy.RecordingUUID);
+	const auto First = TestingFloorRecordingTests::Lease(TEXT("recording-a"), Directory / TEXT("a"), Now);
+	TF_REQUIRE_TRUE(Payload.Write(TestingFloorRecordingTests::LeaseJson(First)), "Publish first project lease");
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	TF_REQUIRE_TRUE(Client->GetRecordingContext().IsSet(), "Advanced non-editor client discovers a project lease without a supplied source");
+	TestEqual(TEXT("Standalone attaches A"), Client->GetRecordingContext()->RecordingUUID, First.RecordingUUID);
+	FFileHelper::SaveStringToFile(TEXT("1"), *(First.TelemetryDirectory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	const auto Second = TestingFloorRecordingTests::Lease(TEXT("recording-b"), Directory / TEXT("b"), Now);
+	TF_REQUIRE_TRUE(Payload.Write(TestingFloorRecordingTests::LeaseJson(Second)), "Publish second project lease");
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	TF_REQUIRE_TRUE(Client->GetRecordingContext().IsSet(), "Standalone discovers the next recording without restarting");
+	TestEqual(TEXT("Standalone attaches B"), Client->GetRecordingContext()->RecordingUUID, Second.RecordingUUID);
+	TestEqual(TEXT("Standalone keeps its Play identity"), Client->GetPlaySessionID(), PlayID);
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorIndependentCapturePolicyTest, "TestingFloor.Sdk.CapturePolicySurvivesBlockedTelemetry", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorIndependentCapturePolicyTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	auto Settings = TestingFloorRecordingTests::Settings();
+	Settings.bEnabled = false;
+	const auto Transport = MakeShared<TestingFloorRecordingTests::FCapturingTransport>();
+	const auto Client = TestingFloor::FClient::Create(Settings, { true, false }, Transport, [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	TestFalse(TEXT("Master-disabled telemetry has no attached context"), Client->GetRecordingContext().IsSet());
+	const auto Handoff = Client->GetRecordingHandoff();
+	TF_REQUIRE_TRUE(Handoff.IsSet(), "A live capture handoff is visible independently of collection");
+	TestingFloor::FQrPolicy Policy;
+	Policy.bEnabled = true;
+	Policy.bSuppressQR = Handoff->bSuppressQR;
+	TestFalse(TEXT("Capture suppression remains effective while telemetry is blocked"), Policy.IsEnabled());
+	TestFalse(TEXT("Blocked capture does not register a telemetry participant"), IFileManager::Get().FileExists(*(Directory / (Client->GetPlaySessionID() + TEXT(".session")))));
+	TestFalse(TEXT("Blocked capture cannot queue gameplay"), Client->Track(TEXT("disabled-event")));
+	TestEqual(TEXT("Blocked telemetry sends no requests"), Transport->Bodies.Num(), 0);
+	Now += FTimespan::FromSeconds(6);
+	TestFalse(TEXT("Expired capture handoff cannot keep suppressing QR"), Client->GetRecordingHandoff().IsSet());
+	Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	Client->PollRecordingContext();
+	TestTrue(TEXT("Renewed capture policy is rediscovered independently"), Client->GetRecordingHandoff().IsSet());
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	TestFalse(TEXT("Authoritative closure clears capture suppression"), Client->GetRecordingHandoff().IsSet());
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorLegacyCaptureFallbackTest, "TestingFloor.Sdk.LegacyCaptureFallbackRetiresAfterReplacement", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorLegacyCaptureFallbackTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current;
+	auto Settings = TestingFloorRecordingTests::Settings();
+	Settings.bEnabled = false;
+	TestingFloor::FRecordingContext Legacy;
+	Legacy.RecordingUUID = TEXT("explicit-legacy-context");
+	Settings.Recording = Legacy;
+	const auto Client = TestingFloor::FClient::Create(Settings, { true, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	Client->PollRecordingContext();
+	TF_REQUIRE_TRUE(Client->GetRecordingHandoff().IsSet(), "Explicit legacy capture policy survives an empty source");
+	TestEqual(TEXT("Legacy fallback remains visible despite blocked telemetry"), Client->GetRecordingHandoff()->RecordingUUID, Legacy.RecordingUUID);
+	Current = TestingFloorRecordingTests::Lease(TEXT("next-recording"), Directory, Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	TF_REQUIRE_TRUE(Client->GetRecordingHandoff().IsSet(), "New capture replaces the explicit fallback");
+	TestEqual(TEXT("Capture policy follows the new recording"), Client->GetRecordingHandoff()->RecordingUUID, Current->RecordingUUID);
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	Current = Legacy;
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	TestFalse(TEXT("A retired static fallback cannot suppress QR after the next recording closes"), Client->GetRecordingHandoff().IsSet());
+	TestFalse(TEXT("Fallback handling never enables master-disabled telemetry"), Client->GetRecordingContext().IsSet());
+	Client->Shutdown(0.0);
 	IFileManager::Get().DeleteDirectory(*Directory, false, true);
 	return true;
 }

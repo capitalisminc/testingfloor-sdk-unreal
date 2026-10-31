@@ -142,7 +142,7 @@ bool FTestingFloorSequenceTest::RunTest(const FString& Parameters)
 	const TArray<TSharedPtr<FJsonValue>>& FirstEvents = First->GetArrayField(TEXT("events"));
 	TF_REQUIRE_TRUE(FirstEvents.Num() == 2, "Both events sent");
 	TestEqual(TEXT("Every record is schema 2"), FirstEvents[0]->AsObject()->GetIntegerField(TEXT("$schema")), 2);
-	TestEqual(TEXT("SDK version"), FirstEvents[0]->AsObject()->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("sdk_version")), FString(TEXT("0.4.0")));
+	TestEqual(TEXT("SDK version"), FirstEvents[0]->AsObject()->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("sdk_version")), FString(TEXT("0.5.0")));
 	TestEqual(TEXT("Seq starts at 1 for the play session"), Seq(FirstEvents[0]->AsObject()), 1LL);
 	TestEqual(TEXT("Seq increases by one per queued record"), Seq(FirstEvents[1]->AsObject()), 2LL);
 	TestFalse(TEXT("Events are not keyframes"), IsKeyframe(FirstEvents[0]->AsObject()));
