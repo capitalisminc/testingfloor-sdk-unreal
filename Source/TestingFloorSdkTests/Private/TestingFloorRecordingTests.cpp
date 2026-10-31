@@ -83,6 +83,9 @@ bool FTestingFloorRecordingResolutionTest::RunTest(const FString& Parameters)
 	const FString Stale = FString::Printf(TEXT(R"TF({"recording_uuid":"stale","created_at_unix_ms":%lld})TF"), Boundary - 1);
 	TestTrue(TEXT("Exactly twelve-hour-old payload remains valid to the millisecond"), TestingFloor::FRecordingContext::Parse(Fresh, Now).IsSet());
 	TestFalse(TEXT("One millisecond beyond recorder lifetime is stale"), TestingFloor::FRecordingContext::Parse(Stale, Now).IsSet());
+	const FString RenewedOldLease = FString::Printf(TEXT(R"TF({"recording_uuid":"renewed","created_at_unix_ms":%lld,"lease_version":1,"telemetry_requested":true,"lease_expires_at_unix_ms":%lld})TF"), Boundary - 1, NowMilliseconds + 5000);
+	TestTrue(TEXT("A verifiably fresh lease outlives the static handoff age limit"), TestingFloor::FRecordingContext::Parse(RenewedOldLease, Now).IsSet());
+	TestFalse(TEXT("An expired lease cannot bypass the static age limit"), TestingFloor::FRecordingContext::Parse(RenewedOldLease, Now + FTimespan::FromSeconds(5)).IsSet());
 	TestTrue(TEXT("Outlying future timestamps do not overflow date construction"), TestingFloor::FRecordingContext::Parse(TEXT(R"TF({"recording_uuid":"future","created_at_unix_ms":9223372036854775807})TF"), Now).IsSet());
 	const TArray<FString> Sidecars{ TEXT("invalid-json"), Stale, Fresh, TEXT(R"TF({"recording_uuid":"lower-priority"})TF") };
 	for (const FString& CommandLine : { FString(), FString(TEXT("--testing-floor=invalid-json")), TEXT("--testing-floor=") + Stale })

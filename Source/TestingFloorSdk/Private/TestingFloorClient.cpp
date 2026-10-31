@@ -346,9 +346,13 @@ TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDate
 	{
 		return {};
 	}
+	Object->TryGetNumberField(TEXT("lease_version"), Result.LeaseVersion);
+	Object->TryGetNumberField(TEXT("editor_pid"), Result.EditorProcessID);
+	Object->TryGetNumberField(TEXT("lease_expires_at_unix_ms"), Result.LeaseExpiresAtUnixMilliseconds);
+	Object->TryGetBoolField(TEXT("telemetry_requested"), Result.bTelemetryRequested);
 	int64 CreatedAt = 0;
 	const int64 NowMilliseconds = Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond();
-	if (Object->TryGetNumberField(TEXT("created_at_unix_ms"), CreatedAt) && CreatedAt > 0
+	if (!Result.HasActiveLease(Now) && Object->TryGetNumberField(TEXT("created_at_unix_ms"), CreatedAt) && CreatedAt > 0
 		&& CreatedAt < NowMilliseconds - 12LL * 60 * 60 * 1000)
 	{
 		return {};
@@ -359,10 +363,6 @@ TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDate
 		Result.PlaytestID = PlaytestID;
 	}
 	Object->TryGetBoolField(TEXT("suppress_qr"), Result.bSuppressQR);
-	Object->TryGetNumberField(TEXT("lease_version"), Result.LeaseVersion);
-	Object->TryGetNumberField(TEXT("editor_pid"), Result.EditorProcessID);
-	Object->TryGetNumberField(TEXT("lease_expires_at_unix_ms"), Result.LeaseExpiresAtUnixMilliseconds);
-	Object->TryGetBoolField(TEXT("telemetry_requested"), Result.bTelemetryRequested);
 	return Result;
 }
 
