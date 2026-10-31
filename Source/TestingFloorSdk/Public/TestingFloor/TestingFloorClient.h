@@ -256,6 +256,8 @@ private:
 	bool bRecordingInterrupted = false;
 	TOptional<FRecordingContext> ExposedRecording;
 	TOptional<FRecordingContext> DiscoveredRecording;
+	TOptional<FRecordingContext> LegacyRecordingFallback;
+	TSet<FString> RetiredHandoffs;
 	TSet<FString> CompletedRecordings;
 	TMap<FString, int32> RecordingDrops;
 	FDateTime NextRecordingPoll;

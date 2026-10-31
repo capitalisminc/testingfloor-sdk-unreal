@@ -698,9 +698,15 @@ bool FTestingFloorStandaloneDiscoveryTest::RunTest(const FString& Parameters)
 	TF_REQUIRE_TRUE(Payload.Write(TEXT("{}")), "Own a temporary project handoff while preserving its original bytes");
 	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
 	FDateTime Now(2026, 1, 1);
-	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { false, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; });
+	auto Settings = TestingFloorRecordingTests::Settings();
+	TestingFloor::FRecordingContext Legacy;
+	Legacy.RecordingUUID = TEXT("explicit-legacy-context");
+	Settings.Recording = Legacy;
+	const auto Client = TestingFloor::FClient::Create(Settings, { false, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; });
 	const FString PlayID = Client->GetPlaySessionID();
-	TestFalse(TEXT("Standalone starts without a recording attachment"), Client->GetRecordingContext().IsSet());
+	Client->PollRecordingContext();
+	TF_REQUIRE_TRUE(Client->GetRecordingContext().IsSet(), "Explicit legacy context survives an empty default source");
+	TestEqual(TEXT("Legacy context is retained until replaced"), Client->GetRecordingContext()->RecordingUUID, Legacy.RecordingUUID);
 	const auto First = TestingFloorRecordingTests::Lease(TEXT("recording-a"), Directory / TEXT("a"), Now);
 	TF_REQUIRE_TRUE(Payload.Write(TestingFloorRecordingTests::LeaseJson(First)), "Publish first project lease");
 	Now += FTimespan::FromMilliseconds(250);
@@ -751,6 +757,39 @@ bool FTestingFloorIndependentCapturePolicyTest::RunTest(const FString& Parameter
 	Now += FTimespan::FromMilliseconds(250);
 	Client->PollRecordingContext();
 	TestFalse(TEXT("Authoritative closure clears capture suppression"), Client->GetRecordingHandoff().IsSet());
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorLegacyCaptureFallbackTest, "TestingFloor.Sdk.LegacyCaptureFallbackRetiresAfterReplacement", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorLegacyCaptureFallbackTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current;
+	auto Settings = TestingFloorRecordingTests::Settings();
+	Settings.bEnabled = false;
+	TestingFloor::FRecordingContext Legacy;
+	Legacy.RecordingUUID = TEXT("explicit-legacy-context");
+	Settings.Recording = Legacy;
+	const auto Client = TestingFloor::FClient::Create(Settings, { true, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	Client->PollRecordingContext();
+	TF_REQUIRE_TRUE(Client->GetRecordingHandoff().IsSet(), "Explicit legacy capture policy survives an empty source");
+	TestEqual(TEXT("Legacy fallback remains visible despite blocked telemetry"), Client->GetRecordingHandoff()->RecordingUUID, Legacy.RecordingUUID);
+	Current = TestingFloorRecordingTests::Lease(TEXT("next-recording"), Directory, Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	TF_REQUIRE_TRUE(Client->GetRecordingHandoff().IsSet(), "New capture replaces the explicit fallback");
+	TestEqual(TEXT("Capture policy follows the new recording"), Client->GetRecordingHandoff()->RecordingUUID, Current->RecordingUUID);
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	Current = Legacy;
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	TestFalse(TEXT("A retired static fallback cannot suppress QR after the next recording closes"), Client->GetRecordingHandoff().IsSet());
+	TestFalse(TEXT("Fallback handling never enables master-disabled telemetry"), Client->GetRecordingContext().IsSet());
 	Client->Shutdown(0.0);
 	IFileManager::Get().DeleteDirectory(*Directory, false, true);
 	return true;

@@ -637,6 +637,7 @@ FClient::FClient(FSettings InSettings, FEnvironment InEnvironment, TSharedRef<IT
 	TOptional<FRecordingContext> Initial = Settings.Recording;
 	if (!Initial.IsSet() && RecordingSource) Initial = RecordingSource(Clock());
 	Settings.Recording.Reset();
+	if (Initial.IsSet() && Initial->LeaseVersion == 0) LegacyRecordingFallback = Initial;
 	ObserveRecordingHandoff(Initial, Clock());
 	if (Initial.IsSet()) AttachRecording(Initial.GetValue());
 }
@@ -1073,6 +1074,10 @@ void FClient::ObserveRecordingHandoff(const TOptional<FRecordingContext>& Candid
 {
 	if (Candidate.IsSet())
 	{
+		if (DiscoveredRecording.IsSet() && DiscoveredRecording->RecordingUUID != Candidate->RecordingUUID)
+		{
+			RetiredHandoffs.Add(DiscoveredRecording->RecordingUUID);
+		}
 		DiscoveredRecording = Candidate;
 	}
 	else if (DiscoveredRecording.IsSet() && (DiscoveredRecording->LeaseVersion == 0 || !DiscoveredRecording->HasLiveLease(Now)))
@@ -1082,6 +1087,7 @@ void FClient::ObserveRecordingHandoff(const TOptional<FRecordingContext>& Candid
 	if (DiscoveredRecording.IsSet() && !DiscoveredRecording->TelemetryDirectory.IsEmpty()
 		&& IFileManager::Get().FileExists(*(DiscoveredRecording->TelemetryDirectory / TEXT("closed.json"))))
 	{
+		RetiredHandoffs.Add(DiscoveredRecording->RecordingUUID);
 		DiscoveredRecording.Reset();
 	}
 }
@@ -1107,6 +1113,8 @@ void FClient::UpdateRecordingContext(bool bForce)
 	{
 		NextRecordingPoll = Now + FTimespan::FromMilliseconds(250);
 		Candidate = RecordingSource ? RecordingSource(Now) : Settings.Recording;
+		if (Candidate.IsSet() && (CompletedRecordings.Contains(Candidate->RecordingUUID) || RetiredHandoffs.Contains(Candidate->RecordingUUID))) Candidate.Reset();
+		if (!Candidate.IsSet() && LegacyRecordingFallback.IsSet() && !CompletedRecordings.Contains(LegacyRecordingFallback->RecordingUUID) && !RetiredHandoffs.Contains(LegacyRecordingFallback->RecordingUUID)) Candidate = LegacyRecordingFallback;
 		ObserveRecordingHandoff(Candidate, Now);
 		if (Candidate.IsSet() && Settings.Recording.IsSet() && Candidate->RecordingUUID == Settings.Recording->RecordingUUID && !bRecordingClosed)
 		{
