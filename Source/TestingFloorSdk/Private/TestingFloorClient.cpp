@@ -1038,7 +1038,7 @@ bool FClient::AttachRecording(const FRecordingContext& Recording)
 	if (!Recording.TelemetryDirectory.IsEmpty())
 	{
 		if (!IFileManager::Get().DirectoryExists(*Recording.TelemetryDirectory)
-			|| IFileManager::Get().FileExists(*(Recording.TelemetryDirectory / TEXT("closed.json")))
+			|| IFileManager::Get().FileExists(*(Recording.TelemetryDirectory / TEXT("closed.json"))))
 		{
 			WriteRecordingStatus(Recording, TEXT("closed"), TEXT("recording_closed"));
 			CompletedRecordings.Add(Recording.RecordingUUID);
