@@ -402,7 +402,9 @@ bool FTestingFloorDynamicRecordingTest::RunTest(const FString& Parameters)
 	bool bFoundInterruptedCompletion = false;
 	for (const FString& BodyJson : Transport->Bodies)
 	{
-		for (const auto& Value : TestingFloorRecordingTests::Parse(BodyJson)->GetArrayField(TEXT("events")))
+		const auto ParsedBody = TestingFloorRecordingTests::Parse(BodyJson);
+		TF_REQUIRE_TRUE(ParsedBody.IsValid(), "Captured batch parses as JSON");
+		for (const auto& Value : ParsedBody->GetArrayField(TEXT("events")))
 		{
 			const auto Event = Value->AsObject();
 			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_telemetry_complete") && Event->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("recording_uuid")) == TEXT("recording-a"))
@@ -445,7 +447,9 @@ bool FTestingFloorRecordingDropIsolationTest::RunTest(const FString& Parameters)
 	TMap<FString, int32> Drops;
 	for (const FString& BodyJson : Transport->Bodies)
 	{
-		for (const auto& Value : TestingFloorRecordingTests::Parse(BodyJson)->GetArrayField(TEXT("events")))
+		const auto ParsedBody = TestingFloorRecordingTests::Parse(BodyJson);
+		TF_REQUIRE_TRUE(ParsedBody.IsValid(), "Captured batch parses as JSON");
+		for (const auto& Value : ParsedBody->GetArrayField(TEXT("events")))
 		{
 			const auto Event = Value->AsObject();
 			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_telemetry_complete")) Drops.Add(Event->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("recording_uuid")), Event->GetIntegerField(TEXT("dropped_events")));
@@ -487,7 +491,9 @@ bool FTestingFloorRecordingCloseReentryTest::RunTest(const FString& Parameters)
 	bool bSeenMarker = false;
 	for (const FString& BodyJson : Transport->Bodies)
 	{
-		for (const auto& Value : TestingFloorRecordingTests::Parse(BodyJson)->GetArrayField(TEXT("events")))
+		const auto ParsedBody = TestingFloorRecordingTests::Parse(BodyJson);
+		TF_REQUIRE_TRUE(ParsedBody.IsValid(), "Captured batch parses as JSON");
+		for (const auto& Value : ParsedBody->GetArrayField(TEXT("events")))
 		{
 			const auto Event = Value->AsObject();
 			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_telemetry_complete"))
@@ -585,7 +591,9 @@ bool FTestingFloorRenewedLeaseCloseBufferTest::RunTest(const FString& Parameters
 	bool bCompleted = false;
 	for (const FString& BodyJson : Transport->Bodies)
 	{
-		for (const auto& Value : TestingFloorRecordingTests::Parse(BodyJson)->GetArrayField(TEXT("events")))
+		const auto ParsedBody = TestingFloorRecordingTests::Parse(BodyJson);
+		TF_REQUIRE_TRUE(ParsedBody.IsValid(), "Captured batch parses as JSON");
+		for (const auto& Value : ParsedBody->GetArrayField(TEXT("events")))
 		{
 			const auto Event = Value->AsObject();
 			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_objects"))

@@ -139,7 +139,7 @@ bool FTestingFloorPayloadTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("64-bit integer keeps exact wire precision"), Transport->Bodies[0].Contains(TEXT("9007199254740993")));
 	const TSharedPtr<FJsonObject>* Metadata = nullptr;
 	TF_REQUIRE_TRUE(Payload->TryGetObjectField(TEXT("$tf"), Metadata) && Metadata && Metadata->IsValid(), "SDK metadata object");
-	TestEqual(TEXT("SDK metadata"), (*Metadata)->GetStringField(TEXT("sdk_version")), FString(TEXT("0.4.0")));
+	TestEqual(TEXT("SDK metadata"), (*Metadata)->GetStringField(TEXT("sdk_version")), FString(TEXT("0.5.0")));
 	return true;
 }
 
