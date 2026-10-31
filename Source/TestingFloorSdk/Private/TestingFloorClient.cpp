@@ -731,7 +731,6 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 	{
 		return false;
 	}
-	CheckRecordingClosed();
 	const FDateTime Timestamp = Clock();
 	TOptional<FActivitySample> Sample;
 	if (ActivitySource)
@@ -1014,6 +1013,7 @@ void FClient::ResetRecordingBaselines()
 		Pair.Value.LastKnown.Reset();
 		Pair.Value.LastSent.Reset();
 	}
+	Teleports.Reset();
 	ResetMovement();
 }
 
@@ -1071,17 +1071,12 @@ void FClient::UpdateRecordingContext(bool bForce)
 	TGuardValue<bool> Guard(bRefreshingRecording, true);
 	CheckRecordingClosed();
 	const FDateTime Now = Clock();
-	if (Settings.Recording.IsSet() && !bRecordingClosed && !bRecordingSuspended
-		&& Settings.Recording->LeaseVersion != 0 && !Settings.Recording->HasActiveLease(Now))
-	{
-		bRecordingSuspended = bRecordingInterrupted = true;
-		ExposedRecording.Reset();
-		ResetMovement();
-		WriteRecordingStatus(Settings.Recording.GetValue(), TEXT("suspended"), TEXT("lease_expired"));
-	}
-	if (!bForce && Now < NextRecordingPoll) return;
+	const bool bCachedLeaseExpired = Settings.Recording.IsSet() && !bRecordingClosed
+		&& Settings.Recording->LeaseVersion != 0 && !Settings.Recording->HasActiveLease(Now);
+	if (!bForce && Now < NextRecordingPoll && !bCachedLeaseExpired) return;
 	NextRecordingPoll = Now + FTimespan::FromMilliseconds(250);
-	const TOptional<FRecordingContext> Candidate = RecordingSource ? RecordingSource(Now) : Settings.Recording;
+	TOptional<FRecordingContext> Candidate = RecordingSource ? RecordingSource(Now) : Settings.Recording;
+	if (Candidate.IsSet() && CompletedRecordings.Contains(Candidate->RecordingUUID)) Candidate.Reset();
 	if (Candidate.IsSet() && (!Settings.Recording.IsSet() || Candidate->RecordingUUID != Settings.Recording->RecordingUUID))
 	{
 		if (Settings.Recording.IsSet() && !bRecordingClosed)
@@ -1097,11 +1092,12 @@ void FClient::UpdateRecordingContext(bool bForce)
 		if (Candidate.IsSet()) Settings.Recording = Candidate;
 		if (Settings.Recording->LeaseVersion != 0)
 		{
-			const bool bActive = Candidate.IsSet() && Settings.Recording->HasActiveLease(Now);
+			const bool bActive = Settings.Recording->HasActiveLease(Now);
 			if (!bActive)
 			{
 				bRecordingSuspended = bRecordingInterrupted = true;
 				ExposedRecording.Reset();
+				Teleports.Reset();
 				ResetMovement();
 				WriteRecordingStatus(Settings.Recording.GetValue(), TEXT("suspended"), TEXT("lease_expired"));
 			}
@@ -1166,6 +1162,8 @@ void FClient::FinishRecording(const TCHAR* Reason)
 	if (bRecordingClosed || !Settings.Recording.IsSet()) return;
 	bRecordingClosed = true;
 	ExposedRecording.Reset();
+	Teleports.Reset();
+	ResetMovement();
 	CompletedRecordings.Add(Settings.Recording->RecordingUUID);
 	WriteRecordingStatus(Settings.Recording.GetValue(), TEXT("closed"), Reason);
 	if (!bRecordingRegistered) return;
@@ -1380,7 +1378,8 @@ void FClient::EmitMovement(const TCHAR* Reason, double Distance, double Duration
 
 uint64 FClient::BeginTeleport(const FString& Reason)
 {
-	if (State != EState::Ok && State != EState::NetworkDown)
+	UpdateRecordingContext(false);
+	if (!IsCollecting())
 	{
 		return 0;
 	}
@@ -1393,6 +1392,13 @@ uint64 FClient::BeginTeleport(const FString& Reason)
 
 void FClient::EndTeleport(uint64 Token)
 {
+	UpdateRecordingContext(false);
+	if (!IsCollecting())
+	{
+		Teleports.Remove(Token);
+		ResetMovement();
+		return;
+	}
 	FTeleport Teleport;
 	if (!Teleports.RemoveAndCopyValue(Token, Teleport))
 	{

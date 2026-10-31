@@ -459,4 +459,110 @@ bool FTestingFloorRecordingDropIsolationTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecordingCloseReentryTest, "TestingFloor.Sdk.RecordingCloseProviderReentry", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRecordingCloseReentryTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	const auto Transport = MakeShared<TestingFloorRecordingTests::FCapturingTransport>();
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, Transport, [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	bool bEmitDuringClose = false;
+	Client->SetActivitySource([&Client, &bEmitDuringClose] {
+		if (bEmitDuringClose)
+		{
+			bEmitDuringClose = false;
+			Client->Track(TEXT("provider-close-event"));
+		}
+		return TestingFloor::FActivitySample();
+	});
+	Client->Tick(0.0);
+	bEmitDuringClose = true;
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.25);
+	for (int32 Attempt = 0; Attempt < 10 && Client->GetPendingEventCount() > 0; ++Attempt) Client->Flush();
+	bool bFoundCallbackEvent = false;
+	int32 Markers = 0;
+	bool bSeenMarker = false;
+	for (const FString& BodyJson : Transport->Bodies)
+	{
+		for (const auto& Value : TestingFloorRecordingTests::Parse(BodyJson)->GetArrayField(TEXT("events")))
+		{
+			const auto Event = Value->AsObject();
+			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_telemetry_complete"))
+			{
+				++Markers;
+				bSeenMarker = true;
+			}
+			else if (Event->GetStringField(TEXT("$name")) == TEXT("provider-close-event"))
+			{
+				bFoundCallbackEvent = true;
+				TestFalse(TEXT("Provider event precedes completion"), bSeenMarker);
+				TestEqual(TEXT("Provider event retains the closing recording"), Event->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("recording_uuid")), FString(TEXT("example-recording")));
+			}
+		}
+	}
+	TestTrue(TEXT("The provider event is accepted during buffered closure"), bFoundCallbackEvent);
+	TestEqual(TEXT("Closure is completed exactly once"), Markers, 1);
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRenewedLeaseHitchTest, "TestingFloor.Sdk.RenewedLeaseSurvivesGameThreadHitch", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRenewedLeaseHitchTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	Client->Tick(0.0);
+	Now += FTimespan::FromSeconds(6);
+	Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	Client->Tick(6.0);
+	FString StatusJson;
+	FFileHelper::LoadFileToString(StatusJson, *(Directory / (Client->GetPlaySessionID() + TEXT(".status.json"))));
+	const auto Status = TestingFloorRecordingTests::Parse(StatusJson);
+	TF_REQUIRE_TRUE(Status.IsValid(), "Renewed lease writes status");
+	TestEqual(TEXT("Renewed recording stays active across a game-thread hitch"), Client->GetState(), TestingFloor::EState::Ok);
+	TestFalse(TEXT("A fresh source is checked before declaring expiry"), Status->GetBoolField(TEXT("interrupted")));
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorTeleportRecordingBoundaryTest, "TestingFloor.Sdk.TeleportScopesRespectRecordingBoundaries", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorTeleportRecordingBoundaryTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current;
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	int32 PositionReads = 0;
+	Client->SetActivitySource([&PositionReads] { ++PositionReads; TestingFloor::FActivitySample Result; Result.PlayerPosition = FVector::ZeroVector; return Result; });
+	const uint64 DormantToken = Client->BeginTeleport(TEXT("before-recording"));
+	TestEqual(TEXT("Dormant teleport scope is rejected"), DormantToken, uint64(0));
+	Client->EndTeleport(DormantToken);
+	TestEqual(TEXT("Dormant teleport methods do not sample gameplay"), PositionReads, 0);
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-a"), Directory / TEXT("a"), Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.0);
+	const uint64 AToken = Client->BeginTeleport(TEXT("a-scope"));
+	TestTrue(TEXT("Active recording can begin a teleport scope"), AToken != 0);
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Current->TelemetryDirectory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.25);
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-b"), Directory / TEXT("b"), Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.5);
+	const int32 ReadsBeforeOldEnd = PositionReads;
+	Client->EndTeleport(AToken);
+	TestEqual(TEXT("Old scope cannot sample in a new recording"), PositionReads, ReadsBeforeOldEnd);
+	TestFalse(TEXT("A teleport cannot carry pre-recording positions into B"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("player_teleported"); }));
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
 #endif
