@@ -43,8 +43,13 @@ struct TESTINGFLOORSDK_API FRecordingContext
 	FString TelemetryDirectory;
 	TOptional<int64> PlaytestID;
 	bool bSuppressQR = true;
+	int32 LeaseVersion = 0;
+	int64 EditorProcessID = 0;
+	int64 LeaseExpiresAtUnixMilliseconds = 0;
+	bool bTelemetryRequested = false;
+	bool HasActiveLease(FDateTime Now) const;
 	/** Read the current launch argument or Saved/TestingFloor/recording-payload.json. */
-	static TOptional<FRecordingContext> Discover();
+	static TOptional<FRecordingContext> Discover(FDateTime Now = FDateTime::UtcNow());
 	static TOptional<FRecordingContext> Parse(const FString& Json, FDateTime Now);
 	/** Handles raw argv flattened by Unreal, shell quoting and Windows escaped JSON. */
 	static TOptional<FRecordingContext> FromCommandLine(const FString& CommandLine, FDateTime Now);
@@ -56,6 +61,8 @@ struct FSettings
 {
 	bool bEnabled = true;
 	bool bEnableInEditor = false;
+	/** Permit editor telemetry only while attached to a live desktop recording lease. */
+	bool bEnableInEditorWhileRecording = true;
 	FString WriteKey;
 	FString Endpoint = TEXT("https://dataentry.testingfloor.com");
 	FString DeviceID;
@@ -146,7 +153,7 @@ public:
 };
 
 TESTINGFLOORSDK_API TSharedRef<ITransport> MakeHttpTransport();
-TESTINGFLOORSDK_API bool ShouldCollect(const FSettings& Settings, const FEnvironment& Environment);
+TESTINGFLOORSDK_API bool ShouldCollect(const FSettings& Settings, const FEnvironment& Environment, FDateTime Now = FDateTime::UtcNow());
 TESTINGFLOORSDK_API FString SerializeEvent(const FEvent& Event, const FSettings& Settings);
 TESTINGFLOORSDK_API FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FDateTime SentAt, int32& OutConsumed, int32* OutWritten = nullptr, int32* OutRecordingDropped = nullptr);
 
@@ -157,6 +164,7 @@ public:
 	using FContextProvider = TFunction<void(FProperties&)>;
 	using FActivitySource = TFunction<FActivitySample()>;
 	using FClock = TFunction<FDateTime()>;
+	using FRecordingSource = TFunction<TOptional<FRecordingContext>(FDateTime)>;
 	/** Returns native centimeters, or unset once the object is gone. */
 	using FPositionSource = TFunction<TOptional<FVector>()>;
 
@@ -166,7 +174,7 @@ public:
 	FClient(const FClient&) = delete;
 	FClient& operator=(const FClient&) = delete;
 	/** Advanced creation seam for custom transports and deterministic clocks. */
-	static TSharedRef<FClient> Create(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock = [] { return FDateTime::UtcNow(); });
+	static TSharedRef<FClient> Create(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock = [] { return FDateTime::UtcNow(); }, FRecordingSource RecordingSource = {});
 	/** Small values that describe each moment, such as level, health and game clock. Added to every event. */
 	void SetContextProvider(FContextProvider Provider);
 	/** Values that stay true until they change. Sent as `$tf_state` changes and keyframes, not on every event. */
@@ -187,6 +195,8 @@ public:
 	/** Tick with monotonic real time, including during gameplay pause. */
 	void Tick();
 	void Tick(double NowSeconds);
+	/** Refresh only the recording lifecycle, without sampling movement or duplicating a host Tick. */
+	void PollRecordingContext();
 	void Flush();
 	/** Bounded shutdown drain. A deadline never stalls game exit indefinitely. */
 	void Shutdown(double TimeoutSeconds);
@@ -197,7 +207,8 @@ public:
 	void ResetMovement();
 	/**
 	 * Track a world object's path in `$tf_objects` records. Without an ID the SDK assigns `kind#n`.
-	 * Returns 0, a handle that does nothing, when collection is off or the live-object limit is reached.
+	 * Returns 0 when the integration is disabled/unconfigured or the live-object limit is reached.
+	 * Dormant editor clients retain registrations without sampling until recording starts.
 	 * A position source that returns unset removes the object with reason `gone`.
 	 */
 	uint64 TrackObject(const FString& Kind, FPositionSource PositionCentimeters, const FString& ID = {});
@@ -223,10 +234,24 @@ public:
 	const TArray<FEvent>& GetQueuedEvents() const;
 
 private:
-	FClient(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock);
+	FClient(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock, FRecordingSource RecordingSource);
 	void CompleteSend(int32 ResponseCode, bool bSucceeded);
-	void FinishRecording();
+	void FinishRecording(const TCHAR* Reason = TEXT("recording_closed"));
 	void CheckRecordingClosed();
+	void UpdateRecordingContext(bool bForce);
+	bool AttachRecording(const FRecordingContext& Recording);
+	void WriteRecordingStatus(const FRecordingContext& Recording, const TCHAR* Status, const TCHAR* Reason);
+	bool CollectionPermitted() const;
+	bool ConfigurationPermitted() const;
+	void CountDroppedRecords(TConstArrayView<FEvent> Records);
+	void ResetRecordingBaselines();
+	bool bRefreshingRecording = false;
+	bool bRecordingSuspended = false;
+	bool bRecordingInterrupted = false;
+	TOptional<FRecordingContext> ExposedRecording;
+	TSet<FString> CompletedRecordings;
+	TMap<FString, int32> RecordingDrops;
+	FDateTime NextRecordingPoll;
 	/** Queue state changes and object rows that are waiting for the next poll or check. At shutdown,
 	 *  removals the queue still refuses are abandoned; otherwise they wait for later checks. */
 	void SendBufferedRecords(bool bShuttingDown);
@@ -251,7 +276,10 @@ private:
 	void QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe);
 
 	FTSTicker::FDelegateHandle TickerHandle;
+	FTSTicker::FDelegateHandle RecordingTickerHandle;
 	FSettings Settings;
+	FEnvironment Environment;
+	FRecordingSource RecordingSource;
 	TSharedRef<ITransport> Transport;
 	FClock Clock;
 	FContextProvider ContextProvider;
@@ -268,7 +296,6 @@ private:
 	double NextRetrySeconds = 0.0;
 	double RetryDelaySeconds = 1.0;
 	int32 DroppedEvents = 0;
-	int32 RecordingDroppedEvents = 0;
 	bool bRequestInFlight = false;
 	bool bShutdown = false;
 	bool bFlushRequested = false;

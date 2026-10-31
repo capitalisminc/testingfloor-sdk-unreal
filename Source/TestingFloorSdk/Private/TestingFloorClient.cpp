@@ -22,16 +22,6 @@ namespace TestingFloor
 {
 namespace Private
 {
-int32 RecordingEventCount(TConstArrayView<FEvent> Events)
-{
-	int32 Count = 0;
-	for (const FEvent& Event : Events)
-	{
-		if (Event.Recording.IsSet() && Event.Name != TEXT("$tf_telemetry_complete")) ++Count;
-	}
-	return Count;
-}
-
 constexpr int32 EventByteCap = 32 << 10;
 constexpr int32 BodyByteCap = (1 << 20) - (8 << 10);
 constexpr double StatePollSeconds = 1.0;
@@ -321,15 +311,24 @@ const TMap<FString, TSharedPtr<FJsonValue>>& FProperties::GetValues() const
 	return Properties;
 }
 
-TOptional<FRecordingContext> FRecordingContext::Discover()
+bool FRecordingContext::HasActiveLease(FDateTime Now) const
+{
+	return LeaseVersion == 1 && bTelemetryRequested && LeaseExpiresAtUnixMilliseconds > Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond();
+}
+
+TOptional<FRecordingContext> FRecordingContext::Discover(FDateTime Now)
 {
 	FString Sidecar;
 	TArray<FString> Payloads;
 	if (FFileHelper::LoadFileToString(Sidecar, *(FPaths::ProjectSavedDir() / TEXT("TestingFloor/recording-payload.json"))))
 	{
-		Payloads.Add(MoveTemp(Sidecar));
+		const auto Target = Parse(Sidecar, Now);
+		if (!GIsEditor || !Target.IsSet() || Target->EditorProcessID == 0 || Target->EditorProcessID == FPlatformProcess::GetCurrentProcessId())
+		{
+			Payloads.Add(MoveTemp(Sidecar));
+		}
 	}
-	return Resolve(FCommandLine::Get(), Payloads, FDateTime::UtcNow());
+	return Resolve(FCommandLine::Get(), Payloads, Now);
 }
 
 TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDateTime Now)
@@ -360,6 +359,10 @@ TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDate
 		Result.PlaytestID = PlaytestID;
 	}
 	Object->TryGetBoolField(TEXT("suppress_qr"), Result.bSuppressQR);
+	Object->TryGetNumberField(TEXT("lease_version"), Result.LeaseVersion);
+	Object->TryGetNumberField(TEXT("editor_pid"), Result.EditorProcessID);
+	Object->TryGetNumberField(TEXT("lease_expires_at_unix_ms"), Result.LeaseExpiresAtUnixMilliseconds);
+	Object->TryGetBoolField(TEXT("telemetry_requested"), Result.bTelemetryRequested);
 	return Result;
 }
 
@@ -427,6 +430,15 @@ TOptional<FRecordingContext> FRecordingContext::FromCommandLine(const FString& C
 
 TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now)
 {
+	// A live editor owner supersedes a launch argument for the lifetime of this Play run.
+	// Retain expired leases too: they suspend the association instead of reviving an old CLI value.
+	for (const FString& Json : SidecarPayloads)
+	{
+		if (const auto Recording = Parse(Json, Now); Recording.IsSet() && Recording->LeaseVersion != 0)
+		{
+			return Recording;
+		}
+	}
 	if (const auto Recording = FromCommandLine(CommandLine, Now); Recording.IsSet())
 	{
 		return Recording;
@@ -441,9 +453,11 @@ TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLi
 	return {};
 }
 
-bool ShouldCollect(const FSettings& Settings, const FEnvironment& Environment)
+bool ShouldCollect(const FSettings& Settings, const FEnvironment& Environment, FDateTime Now)
 {
-	return Settings.bEnabled && !Environment.bAutomation && (!Environment.bEditor || Settings.bEnableInEditor)
+	return Settings.bEnabled && !Environment.bAutomation
+		&& (!Environment.bEditor || Settings.bEnableInEditor
+			|| (Settings.bEnableInEditorWhileRecording && Settings.Recording.IsSet() && Settings.Recording->HasActiveLease(Now)))
 		&& !Settings.WriteKey.TrimStartAndEnd().IsEmpty() && !Settings.Endpoint.TrimStartAndEnd().IsEmpty();
 }
 
@@ -468,7 +482,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 		Object->SetStringField(TEXT("$user_id"), Settings.UserID);
 	}
 	const TSharedRef<FJsonObject> Platform = MakeShared<FJsonObject>();
-	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.4.0"));
+	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.5.0"));
 	if (Event.Sequence > 0)
 	{
 		Platform->SetField(TEXT("seq"), MakeShared<FJsonValueNumberString>(LexToString(Event.Sequence)));
@@ -565,7 +579,7 @@ TSharedRef<FClient> FClient::Create(FSettings Settings)
 	if (Settings.OperatingSystem.IsEmpty()) Settings.OperatingSystem = FPlatformProperties::PlatformName();
 	if (Settings.Locale.IsEmpty()) Settings.Locale = FInternationalization::Get().GetCurrentCulture()->GetName();
 	const auto Client = Create(MoveTemp(Settings), {GIsEditor, GIsAutomationTesting}, MakeHttpTransport());
-	if (Client->GetState() == EState::Ok)
+	if (!GIsAutomationTesting)
 	{
 		const TWeakPtr<FClient> WeakClient = Client;
 		Client->TickerHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([WeakClient](float) {
@@ -583,36 +597,44 @@ TSharedRef<FClient> FClient::Create(FSettings Settings)
 FClient::~FClient()
 {
 	FTSTicker::RemoveTicker(TickerHandle);
+	FTSTicker::RemoveTicker(RecordingTickerHandle);
 }
 
-TSharedRef<FClient> FClient::Create(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock)
+TSharedRef<FClient> FClient::Create(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock, FRecordingSource RecordingSource)
 {
-	return MakeShareable(new FClient(MoveTemp(Settings), Environment, MoveTemp(Transport), MoveTemp(Clock)));
-}
-
-FClient::FClient(FSettings InSettings, FEnvironment Environment, TSharedRef<ITransport> InTransport, FClock InClock)
-	: Settings(MoveTemp(InSettings)), Transport(MoveTemp(InTransport)), Clock(MoveTemp(InClock))
-{
-	State = ShouldCollect(Settings, Environment) ? EState::Ok
-		: !Settings.bEnabled || Environment.bAutomation || (Environment.bEditor && !Settings.bEnableInEditor)
-		? EState::Disabled
-		: EState::NotConfigured;
-	SessionID = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
-	if (State == EState::Ok && Settings.Recording.IsSet() && !Settings.Recording->TelemetryDirectory.IsEmpty())
+	const bool bAutomaticDiscovery = Environment.bEditor && !Environment.bAutomation && !RecordingSource;
+	const TSharedRef<FClient> Client = MakeShareable(new FClient(MoveTemp(Settings), Environment, MoveTemp(Transport), MoveTemp(Clock), MoveTemp(RecordingSource)));
+	if (bAutomaticDiscovery)
 	{
-		const FString Path = Settings.Recording->TelemetryDirectory / (SessionID + TEXT(".session"));
-		// The recorder creates the directory. Register before admitting events.
-		bRecordingRegistered = IFileManager::Get().DirectoryExists(*Settings.Recording->TelemetryDirectory)
-			&& FFileHelper::SaveStringToFile(TEXT(""), *Path);
-		if (!bRecordingRegistered) Settings.Recording.Reset();
-		if (bRecordingRegistered)
-		{
-			// Registering with a recording starts it from complete state and object keyframes.
-			bStateKeyframeDue = true;
-			bObjectKeyframeDue = true;
-		}
+		const TWeakPtr<FClient> Weak = Client;
+		Client->RecordingTickerHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Weak](float) {
+			if (const auto Active = Weak.Pin())
+			{
+				Active->PollRecordingContext();
+				return true;
+			}
+			return false;
+		}), 0.25f);
 	}
+	return Client;
+}
 
+FClient::FClient(FSettings InSettings, FEnvironment InEnvironment, TSharedRef<ITransport> InTransport, FClock InClock, FRecordingSource InRecordingSource)
+	: Settings(MoveTemp(InSettings)), Environment(InEnvironment), RecordingSource(MoveTemp(InRecordingSource)), Transport(MoveTemp(InTransport)), Clock(MoveTemp(InClock))
+{
+	State = !Settings.bEnabled || Environment.bAutomation ? EState::Disabled
+		: Settings.WriteKey.TrimStartAndEnd().IsEmpty() || Settings.Endpoint.TrimStartAndEnd().IsEmpty() ? EState::NotConfigured : EState::Ok;
+	SessionID = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+	if (!RecordingSource && Environment.bEditor)
+	{
+		RecordingSource = [](FDateTime Now) { return FRecordingContext::Discover(Now); };
+	}
+	if (Settings.Recording.IsSet())
+	{
+		const FRecordingContext Initial = Settings.Recording.GetValue();
+		Settings.Recording.Reset();
+		AttachRecording(Initial);
+	}
 }
 
 void FClient::SetContextProvider(FContextProvider Provider)
@@ -698,12 +720,13 @@ void FClient::FillActivityContext(FProperties& Properties, const FActivitySample
 
 bool FClient::IsCollecting() const
 {
-	return (State == EState::Ok || State == EState::NetworkDown) && !bShutdown;
+	return (State == EState::Ok || State == EState::NetworkDown) && !bShutdown && CollectionPermitted();
 }
 
 bool FClient::Track(const FString& Name, const FProperties& Properties)
 {
 	check(IsInGameThread());
+	UpdateRecordingContext(false);
 	if (!IsCollecting() || Name.TrimStartAndEnd().IsEmpty())
 	{
 		return false;
@@ -786,18 +809,33 @@ bool FClient::Enqueue(FEvent Record)
 
 TOptional<FRecordingContext> FClient::ActiveRecording() const
 {
-	return bRecordingClosed ? TOptional<FRecordingContext>() : Settings.Recording;
+	return bRecordingClosed || bRecordingSuspended ? TOptional<FRecordingContext>() : Settings.Recording;
 }
 
 void FClient::NoteDropped(int32 Count, int32 RecordingCount)
 {
-	RecordingDroppedEvents += RecordingCount;
+	if (RecordingCount > 0 && ActiveRecording().IsSet())
+	{
+		RecordingDrops.FindOrAdd(Settings.Recording->RecordingUUID) += RecordingCount;
+	}
 	if (Count > 0)
 	{
 		DroppedEvents += Count;
 		// Keyframes let a reader recover from any lost record.
 		bStateKeyframeDue = true;
 		bObjectKeyframeDue = true;
+	}
+}
+
+void FClient::CountDroppedRecords(TConstArrayView<FEvent> Records)
+{
+	NoteDropped(Records.Num());
+	for (const FEvent& Record : Records)
+	{
+		if (Record.Recording.IsSet() && Record.Name != TEXT("$tf_telemetry_complete"))
+		{
+			++RecordingDrops.FindOrAdd(Record.Recording->RecordingUUID);
+		}
 	}
 }
 
@@ -844,7 +882,7 @@ bool FClient::PollState(FDateTime Timestamp, const FActivitySample* Sample)
 		}
 	}
 	// Before anything is sent an empty keyframe has nothing to reset; after that, it clears every value.
-	const bool bSend = !Record.Properties.GetValues().IsEmpty() || (bKeyframe && bStateSent);
+	const bool bSend = !Record.Properties.GetValues().IsEmpty() || (bKeyframe && (bStateSent || (ActiveRecording().IsSet() && Settings.Recording->LeaseVersion == 1)));
 	if (!bSend || !Enqueue(MoveTemp(Record)))
 	{
 		return false;
@@ -868,7 +906,7 @@ void FClient::Tick(double NowSeconds)
 {
 	check(IsInGameThread());
 	CurrentSeconds = NowSeconds;
-	CheckRecordingClosed();
+	UpdateRecordingContext(false);
 	if (!bClockStarted)
 	{
 		bClockStarted = true;
@@ -922,16 +960,173 @@ void FClient::Tick(double NowSeconds)
 	}
 }
 
+
+void FClient::PollRecordingContext()
+{
+	check(IsInGameThread());
+	UpdateRecordingContext(false);
+	// A host may gate its gameplay Tick on GetState. Accepted data still drains after detach.
+	if (!IsCollecting() && GetPendingEventCount() > 0) Tick();
+}
+
+bool FClient::ConfigurationPermitted() const
+{
+	return Settings.bEnabled && !Environment.bAutomation && State != EState::NotConfigured && State != EState::Rejected && !bShutdown;
+}
+
+bool FClient::CollectionPermitted() const
+{
+	return !Environment.bEditor || Settings.bEnableInEditor
+		|| (Settings.bEnableInEditorWhileRecording && bRecordingRegistered && !bRecordingClosed && !bRecordingSuspended
+			&& Settings.Recording.IsSet() && Settings.Recording->HasActiveLease(Clock()));
+}
+
+void FClient::WriteRecordingStatus(const FRecordingContext& Recording, const TCHAR* Status, const TCHAR* Reason)
+{
+	if (Recording.TelemetryDirectory.IsEmpty() || !IFileManager::Get().DirectoryExists(*Recording.TelemetryDirectory)) return;
+	const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+	Value->SetStringField(TEXT("recording_uuid"), Recording.RecordingUUID);
+	Value->SetStringField(TEXT("session_id"), SessionID);
+	Value->SetStringField(TEXT("engine"), TEXT("unreal"));
+	Value->SetStringField(TEXT("sdk_version"), TEXT("0.5.0"));
+	Value->SetStringField(TEXT("state"), Status);
+	Value->SetStringField(TEXT("reason"), Reason);
+	Value->SetBoolField(TEXT("interrupted"), bRecordingInterrupted);
+	const FDateTime Now = Clock();
+	Value->SetNumberField(TEXT("updated_at_unix_ms"), Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond());
+	Value->SetArrayField(TEXT("capabilities"), { MakeShared<FJsonValueString>(TEXT("recording_lease_v1")), MakeShared<FJsonValueString>(TEXT("dynamic_recording_attachment")) });
+	const FString Path = Recording.TelemetryDirectory / (SessionID + TEXT(".status.json"));
+	const FString Temporary = Path + TEXT(".tmp");
+	if (FFileHelper::SaveStringToFile(Private::Encode(Value), *Temporary))
+	{
+		IFileManager::Get().Move(*Path, *Temporary, true, true);
+	}
+}
+
+void FClient::ResetRecordingBaselines()
+{
+	bStateKeyframeDue = bObjectKeyframeDue = true;
+	LastStatePollSeconds = NextObjectCheckSeconds = -1.0;
+	PendingRemovals.Reset();
+	RefusedObjectIDs.Reset();
+	for (auto& Pair : Objects)
+	{
+		Pair.Value.LastKnown.Reset();
+		Pair.Value.LastSent.Reset();
+	}
+	ResetMovement();
+}
+
+bool FClient::AttachRecording(const FRecordingContext& Recording)
+{
+	if (CompletedRecordings.Contains(Recording.RecordingUUID)) return false;
+	const TCHAR* Reason = !Settings.bEnabled ? TEXT("master_disabled") : Environment.bAutomation ? TEXT("automation")
+		: State == EState::NotConfigured ? TEXT("missing_configuration") : State == EState::Rejected ? TEXT("collector_rejected") : TEXT("editor_policy_disabled");
+	const bool bLease = Recording.LeaseVersion != 0;
+	const bool bPermission = ConfigurationPermitted() && (!Environment.bEditor || Settings.bEnableInEditor
+		|| (Settings.bEnableInEditorWhileRecording && Recording.HasActiveLease(Clock())));
+	if (bLease && !Recording.HasActiveLease(Clock()))
+	{
+		WriteRecordingStatus(Recording, TEXT("suspended"), TEXT("lease_expired"));
+		return false;
+	}
+	if (!bPermission)
+	{
+		WriteRecordingStatus(Recording, State == EState::NotConfigured ? TEXT("not_configured") : TEXT("disabled"), Reason);
+		return false;
+	}
+	if (!Recording.TelemetryDirectory.IsEmpty())
+	{
+		if (!IFileManager::Get().DirectoryExists(*Recording.TelemetryDirectory)
+			|| IFileManager::Get().FileExists(*(Recording.TelemetryDirectory / TEXT("closed.json")))
+		{
+			WriteRecordingStatus(Recording, TEXT("closed"), TEXT("recording_closed"));
+			CompletedRecordings.Add(Recording.RecordingUUID);
+			return false;
+		}
+		// The recorder publishes closure before enumerating these registrations.
+		if (!FFileHelper::SaveStringToFile(TEXT(""), *(Recording.TelemetryDirectory / (SessionID + TEXT(".session")))))
+		{
+			WriteRecordingStatus(Recording, TEXT("disabled"), TEXT("registration_failed"));
+			return false;
+		}
+	}
+	Settings.Recording = Recording;
+	bRecordingRegistered = !Recording.TelemetryDirectory.IsEmpty();
+	bRecordingClosed = bRecordingSuspended = bRecordingInterrupted = false;
+	ExposedRecording = Recording;
+	ResetRecordingBaselines();
+	if (bRecordingRegistered && IFileManager::Get().FileExists(*(Recording.TelemetryDirectory / TEXT("closed.json"))))
+	{
+		FinishRecording();
+		return false;
+	}
+	WriteRecordingStatus(Recording, TEXT("attached"), TEXT("none"));
+	return true;
+}
+
+void FClient::UpdateRecordingContext(bool bForce)
+{
+	if (bShutdown || bRefreshingRecording) return;
+	TGuardValue<bool> Guard(bRefreshingRecording, true);
+	CheckRecordingClosed();
+	const FDateTime Now = Clock();
+	if (Settings.Recording.IsSet() && !bRecordingClosed && !bRecordingSuspended
+		&& Settings.Recording->LeaseVersion != 0 && !Settings.Recording->HasActiveLease(Now))
+	{
+		bRecordingSuspended = bRecordingInterrupted = true;
+		ExposedRecording.Reset();
+		ResetMovement();
+		WriteRecordingStatus(Settings.Recording.GetValue(), TEXT("suspended"), TEXT("lease_expired"));
+	}
+	if (!bForce && Now < NextRecordingPoll) return;
+	NextRecordingPoll = Now + FTimespan::FromMilliseconds(250);
+	const TOptional<FRecordingContext> Candidate = RecordingSource ? RecordingSource(Now) : Settings.Recording;
+	if (Candidate.IsSet() && (!Settings.Recording.IsSet() || Candidate->RecordingUUID != Settings.Recording->RecordingUUID))
+	{
+		if (Settings.Recording.IsSet() && !bRecordingClosed)
+		{
+			bRecordingInterrupted = true;
+			if (IsCollecting()) SendBufferedRecords(false);
+			FinishRecording(TEXT("recording_replaced"));
+		}
+		if (AttachRecording(Candidate.GetValue()) && IsCollecting()) SendBufferedRecords(false);
+	}
+	else if (Settings.Recording.IsSet() && !bRecordingClosed)
+	{
+		if (Candidate.IsSet()) Settings.Recording = Candidate;
+		if (Settings.Recording->LeaseVersion != 0)
+		{
+			const bool bActive = Candidate.IsSet() && Settings.Recording->HasActiveLease(Now);
+			if (!bActive)
+			{
+				bRecordingSuspended = bRecordingInterrupted = true;
+				ExposedRecording.Reset();
+				ResetMovement();
+				WriteRecordingStatus(Settings.Recording.GetValue(), TEXT("suspended"), TEXT("lease_expired"));
+			}
+			else
+			{
+				const bool bResumed = bRecordingSuspended;
+				bRecordingSuspended = false;
+				ExposedRecording = Settings.Recording;
+				if (bResumed)
+				{
+					ResetRecordingBaselines();
+					if (IsCollecting()) SendBufferedRecords(false);
+				}
+				WriteRecordingStatus(Settings.Recording.GetValue(), State == EState::Rejected ? TEXT("disabled") : TEXT("attached"), State == EState::Rejected ? TEXT("collector_rejected") : TEXT("none"));
+			}
+		}
+	}
+}
+
 void FClient::CheckRecordingClosed()
 {
-	if (bRecordingRegistered && !bRecordingClosed
+	if (Settings.Recording.IsSet() && !bRecordingClosed && !Settings.Recording->TelemetryDirectory.IsEmpty()
 		&& IFileManager::Get().FileExists(*(Settings.Recording->TelemetryDirectory / TEXT("closed.json"))))
 	{
-		if (IsCollecting())
-		{
-			// Records captured while the recording was open go out with it, ahead of its marker.
-			SendBufferedRecords(false);
-		}
+		if (IsCollecting()) SendBufferedRecords(false);
 		FinishRecording();
 	}
 }
@@ -966,12 +1161,17 @@ void FClient::SendBufferedRecords(bool bShuttingDown)
 	}
 }
 
-void FClient::FinishRecording()
+void FClient::FinishRecording(const TCHAR* Reason)
 {
-	if (bRecordingClosed || !bRecordingRegistered) return;
+	if (bRecordingClosed || !Settings.Recording.IsSet()) return;
 	bRecordingClosed = true;
+	ExposedRecording.Reset();
+	CompletedRecordings.Add(Settings.Recording->RecordingUUID);
+	WriteRecordingStatus(Settings.Recording.GetValue(), TEXT("closed"), Reason);
+	if (!bRecordingRegistered) return;
 	FEvent Marker{ FGuid::NewGuid(), TEXT("$tf_telemetry_complete"), Clock(), SessionID, {} };
 	Marker.Recording = Settings.Recording;
+	Marker.Properties.Set(TEXT("interrupted"), bRecordingInterrupted);
 	Marker.Sequence = NextSequence++;
 	// Control records must remain possible even when the gameplay queue is full.
 	Queue.Add(MoveTemp(Marker));
@@ -988,12 +1188,18 @@ void FClient::Flush()
 	int32 Consumed = 0;
 	if (Queue[0].Name == TEXT("$tf_telemetry_complete"))
 	{
-		Queue[0].Properties.Set(TEXT("dropped_events"), RecordingDroppedEvents);
+		Queue[0].Properties.Set(TEXT("dropped_events"), RecordingDrops.FindRef(Queue[0].Recording->RecordingUUID));
 	}
 	int32 Written = 0;
 	int32 RecordingSkipped = 0;
 	const FString Body = BuildBatch(Queue, Settings, Clock(), Consumed, &Written, &RecordingSkipped);
-	NoteDropped(Consumed - Written, RecordingSkipped);
+	for (int32 Index = 0; Index < Consumed; ++Index)
+	{
+		if (Private::Utf8Length(SerializeEvent(Queue[Index], Settings)) > Private::EventByteCap)
+		{
+			CountDroppedRecords(MakeArrayView(&Queue[Index], 1));
+		}
+	}
 	if (Consumed == 0)
 	{
 		return;
@@ -1037,9 +1243,8 @@ void FClient::CompleteSend(int32 ResponseCode, bool bSucceeded)
 	else if (ResponseCode == 401 || ResponseCode == 403)
 	{
 		State = EState::Rejected;
-		DroppedEvents += InFlight.Num() + Queue.Num();
-		RecordingDroppedEvents += Private::RecordingEventCount(InFlight);
-		RecordingDroppedEvents += Private::RecordingEventCount(Queue);
+		CountDroppedRecords(InFlight);
+		CountDroppedRecords(Queue);
 		InFlight.Reset();
 		Queue.Reset();
 	}
@@ -1048,7 +1253,7 @@ void FClient::CompleteSend(int32 ResponseCode, bool bSucceeded)
 		State = EState::Ok;
 		RetryDelaySeconds = 1.0;
 		NextRetrySeconds = 0.0;
-		NoteDropped(InFlight.Num(), Private::RecordingEventCount(InFlight));
+		CountDroppedRecords(InFlight);
 		InFlight.Reset();
 		bFlushRequested = !Queue.IsEmpty();
 	}
@@ -1066,6 +1271,8 @@ void FClient::Shutdown(double TimeoutSeconds)
 {
 	FTSTicker::RemoveTicker(TickerHandle);
 	TickerHandle.Reset();
+	FTSTicker::RemoveTicker(RecordingTickerHandle);
+	RecordingTickerHandle.Reset();
 	if (IsCollecting())
 	{
 		SendBufferedRecords(true);
@@ -1214,7 +1421,7 @@ void FClient::RecordTeleport(const FVector& StartCentimeters, const FVector& End
 uint64 FClient::TrackObject(const FString& Kind, FPositionSource PositionCentimeters, const FString& ID)
 {
 	check(IsInGameThread());
-	if (!IsCollecting() || !PositionCentimeters)
+	if (!ConfigurationPermitted() || !PositionCentimeters)
 	{
 		return 0;
 	}
@@ -1249,7 +1456,7 @@ uint64 FClient::TrackObject(const FString& Kind, FPositionSource PositionCentime
 		return 0;
 	}
 	FTrackedObject Object{ ObjectID, ObjectKind, MoveTemp(PositionCentimeters) };
-	Object.LastKnown = Private::FinitePosition(Object.Position());
+	if (IsCollecting()) Object.LastKnown = Private::FinitePosition(Object.Position());
 	const uint64 Token = NextObjectToken++;
 	ObjectTokens.Add(ObjectID, Token);
 	Objects.Add(Token, MoveTemp(Object));
@@ -1311,6 +1518,7 @@ void FClient::RemoveObject(uint64 Token, const FString& Reason)
 		return;
 	}
 	ObjectTokens.Remove(Object.ID);
+	if (!IsCollecting()) return;
 	const TOptional<FVector> Final = Private::FinitePosition(Object.Position());
 	FObjectRows Rows{ Object.ID, Object.Kind };
 	if (!Object.LastSent.IsSet() && Object.LastKnown.IsSet())
@@ -1554,7 +1762,7 @@ void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
 
 EState FClient::GetState() const
 {
-	return State;
+	return (State == EState::Ok || State == EState::NetworkDown) && !CollectionPermitted() ? EState::Disabled : State;
 }
 const FString& FClient::GetPlaySessionID() const
 {
@@ -1570,7 +1778,7 @@ const FString& FClient::GetUserID() const
 }
 const TOptional<FRecordingContext>& FClient::GetRecordingContext() const
 {
-	return Settings.Recording;
+	return ExposedRecording;
 }
 int32 FClient::GetPendingEventCount() const
 {
