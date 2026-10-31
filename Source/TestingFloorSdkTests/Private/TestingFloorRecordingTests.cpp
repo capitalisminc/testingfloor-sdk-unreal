@@ -645,4 +645,115 @@ bool FTestingFloorSuspendedLeasePollingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace TestingFloorRecordingTests
+{
+class FScopedProjectHandoff
+{
+public:
+	FScopedProjectHandoff()
+	{
+		Path = FPaths::ProjectSavedDir() / TEXT("TestingFloor/recording-payload.json");
+		bExisted = IFileManager::Get().FileExists(*Path);
+		bReadable = !bExisted || FFileHelper::LoadFileToArray(Original, *Path);
+	}
+	~FScopedProjectHandoff()
+	{
+		if (!bWritten) return;
+		if (bExisted) FFileHelper::SaveArrayToFile(Original, *Path);
+		else IFileManager::Get().Delete(*Path, false, true);
+	}
+	bool Write(const FString& Json)
+	{
+		if (!bReadable) return false;
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
+		bWritten = true;
+		return FFileHelper::SaveStringToFile(Json, *Path);
+	}
+private:
+	FString Path;
+	TArray<uint8> Original;
+	bool bExisted = false;
+	bool bReadable = false;
+	bool bWritten = false;
+};
+
+FString LeaseJson(const TestingFloor::FRecordingContext& Recording)
+{
+	const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+	Value->SetStringField(TEXT("recording_uuid"), Recording.RecordingUUID);
+	Value->SetStringField(TEXT("telemetry_directory"), Recording.TelemetryDirectory);
+	Value->SetNumberField(TEXT("lease_version"), Recording.LeaseVersion);
+	Value->SetNumberField(TEXT("lease_expires_at_unix_ms"), Recording.LeaseExpiresAtUnixMilliseconds);
+	Value->SetBoolField(TEXT("telemetry_requested"), Recording.bTelemetryRequested);
+	FString Json;
+	FJsonSerializer::Serialize(Value, TJsonWriterFactory<>::Create(&Json));
+	return Json;
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorStandaloneDiscoveryTest, "TestingFloor.Sdk.StandaloneDiscoversSuccessiveProjectHandoffs", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorStandaloneDiscoveryTest::RunTest(const FString& Parameters)
+{
+	TestingFloorRecordingTests::FScopedProjectHandoff Payload;
+	TF_REQUIRE_TRUE(Payload.Write(TEXT("{}")), "Own a temporary project handoff while preserving its original bytes");
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { false, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; });
+	const FString PlayID = Client->GetPlaySessionID();
+	TestFalse(TEXT("Standalone starts without a recording attachment"), Client->GetRecordingContext().IsSet());
+	const auto First = TestingFloorRecordingTests::Lease(TEXT("recording-a"), Directory / TEXT("a"), Now);
+	TF_REQUIRE_TRUE(Payload.Write(TestingFloorRecordingTests::LeaseJson(First)), "Publish first project lease");
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	TF_REQUIRE_TRUE(Client->GetRecordingContext().IsSet(), "Advanced non-editor client discovers a project lease without a supplied source");
+	TestEqual(TEXT("Standalone attaches A"), Client->GetRecordingContext()->RecordingUUID, First.RecordingUUID);
+	FFileHelper::SaveStringToFile(TEXT("1"), *(First.TelemetryDirectory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	const auto Second = TestingFloorRecordingTests::Lease(TEXT("recording-b"), Directory / TEXT("b"), Now);
+	TF_REQUIRE_TRUE(Payload.Write(TestingFloorRecordingTests::LeaseJson(Second)), "Publish second project lease");
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	TF_REQUIRE_TRUE(Client->GetRecordingContext().IsSet(), "Standalone discovers the next recording without restarting");
+	TestEqual(TEXT("Standalone attaches B"), Client->GetRecordingContext()->RecordingUUID, Second.RecordingUUID);
+	TestEqual(TEXT("Standalone keeps its Play identity"), Client->GetPlaySessionID(), PlayID);
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorIndependentCapturePolicyTest, "TestingFloor.Sdk.CapturePolicySurvivesBlockedTelemetry", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorIndependentCapturePolicyTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	auto Settings = TestingFloorRecordingTests::Settings();
+	Settings.bEnabled = false;
+	const auto Transport = MakeShared<TestingFloorRecordingTests::FCapturingTransport>();
+	const auto Client = TestingFloor::FClient::Create(Settings, { true, false }, Transport, [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	TestFalse(TEXT("Master-disabled telemetry has no attached context"), Client->GetRecordingContext().IsSet());
+	const auto Handoff = Client->GetRecordingHandoff();
+	TF_REQUIRE_TRUE(Handoff.IsSet(), "A live capture handoff is visible independently of collection");
+	TestingFloor::FQrPolicy Policy;
+	Policy.bEnabled = true;
+	Policy.bSuppressQR = Handoff->bSuppressQR;
+	TestFalse(TEXT("Capture suppression remains effective while telemetry is blocked"), Policy.IsEnabled());
+	TestFalse(TEXT("Blocked capture does not register a telemetry participant"), IFileManager::Get().FileExists(*(Directory / (Client->GetPlaySessionID() + TEXT(".session")))));
+	TestFalse(TEXT("Blocked capture cannot queue gameplay"), Client->Track(TEXT("disabled-event")));
+	TestEqual(TEXT("Blocked telemetry sends no requests"), Transport->Bodies.Num(), 0);
+	Now += FTimespan::FromSeconds(6);
+	TestFalse(TEXT("Expired capture handoff cannot keep suppressing QR"), Client->GetRecordingHandoff().IsSet());
+	Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	Client->PollRecordingContext();
+	TestTrue(TEXT("Renewed capture policy is rediscovered independently"), Client->GetRecordingHandoff().IsSet());
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->PollRecordingContext();
+	TestFalse(TEXT("Authoritative closure clears capture suppression"), Client->GetRecordingHandoff().IsSet());
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
 #endif

@@ -65,9 +65,10 @@ Custom transports and deterministic hosts can use the advanced
 `Create(Settings, Environment, Transport, Clock, RecordingSource)` overload.
 Call `Tick()` or `Tick(monotonicSeconds)` yourself, including during pause, and
 pass the real automation flag. This overload does not sample gameplay through an
-automatic ticker or discover host metadata. In editor environments without an
-injected `RecordingSource`, it installs a separate context-only monitor, so a
-host that gates its gameplay tick on `GetState()` can still attach a recording.
+automatic ticker or discover host metadata. Without an injected
+`RecordingSource`, it installs a separate context-only monitor in editor,
+standalone and packaged hosts, so a host that gates its gameplay tick on
+`GetState()` can still attach a recording.
 With an injected source, call `PollRecordingContext()` or `Tick()` from your host;
 tests can drive the clock and context without reading the real project handoff.
 
@@ -103,7 +104,9 @@ suspension, closure or the policy/configuration preventing attachment. Its
 capabilities are `recording_lease_v1` and `dynamic_recording_attachment`.
 This acknowledges local SDK participation, not warehouse delivery. Use the
 existing completion barrier to determine delivery. No recording modifies saved
-SDK settings.
+SDK settings. `GetRecordingContext()` exposes only an attached telemetry
+association. Use the fresh `GetRecordingHandoff()` for independent capture
+policy such as QR suppression, even when telemetry is disabled or unconfigured.
 
 ## Track Events
 
@@ -263,9 +266,10 @@ an optional reason, then resets the movement baseline.
 
 Recording identity is separate from the client's fresh per-play session ID.
 `FRecordingContext::FromCommandLine` accepts `--testing-floor={"recording_uuid":"..."}`.
-`FRecordingContext::Resolve` tries the command line first, then sidecar JSON
-contents supplied by your game. The recorder owns sidecar file lifetime.
-Handoffs with a timestamp more than 12 hours old are ignored.
+`FRecordingContext::Resolve` prefers a versioned lease sidecar, then falls back
+to the command line and legacy sidecar JSON supplied by your game. The desktop
+app owns sidecar file lifetime. Static handoffs older than 12 hours are ignored;
+a live renewable lease remains valid beyond that static age limit.
 
 For external video capture, `TestingFloor/TestingFloorQr.h` provides
 `FQrPolicy`, `FQrHeartbeat`, and QR pixel generation. Your game renders the

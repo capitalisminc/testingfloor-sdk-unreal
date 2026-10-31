@@ -47,6 +47,7 @@ struct TESTINGFLOORSDK_API FRecordingContext
 	int64 EditorProcessID = 0;
 	int64 LeaseExpiresAtUnixMilliseconds = 0;
 	bool bTelemetryRequested = false;
+	bool HasLiveLease(FDateTime Now) const;
 	bool HasActiveLease(FDateTime Now) const;
 	/** Read the current launch argument or Saved/TestingFloor/recording-payload.json. */
 	static TOptional<FRecordingContext> Discover(FDateTime Now = FDateTime::UtcNow());
@@ -228,7 +229,10 @@ public:
 	const FString& GetPlaySessionID() const;
 	const FString& GetDeviceID() const;
 	const FString& GetUserID() const;
+	/** The attached telemetry context, absent while collection is blocked or suspended. */
 	const TOptional<FRecordingContext>& GetRecordingContext() const;
+	/** Live desktop handoff for independent capture policy, including QR suppression. */
+	TOptional<FRecordingContext> GetRecordingHandoff() const;
 	int32 GetPendingEventCount() const;
 	int32 GetDroppedEventCount() const;
 	const TArray<FEvent>& GetQueuedEvents() const;
@@ -245,10 +249,13 @@ private:
 	bool ConfigurationPermitted() const;
 	void CountDroppedRecords(TConstArrayView<FEvent> Records);
 	void ResetRecordingBaselines();
+	void ObserveRecordingHandoff(const TOptional<FRecordingContext>& Candidate, FDateTime Now);
+	void SendAttachmentKeyframes();
 	bool bRefreshingRecording = false;
 	bool bRecordingSuspended = false;
 	bool bRecordingInterrupted = false;
 	TOptional<FRecordingContext> ExposedRecording;
+	TOptional<FRecordingContext> DiscoveredRecording;
 	TSet<FString> CompletedRecordings;
 	TMap<FString, int32> RecordingDrops;
 	FDateTime NextRecordingPoll;

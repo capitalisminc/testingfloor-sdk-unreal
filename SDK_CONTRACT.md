@@ -35,7 +35,8 @@ A recording-only editor association requires the desktop app's live lease:
 `lease_version:1`, `telemetry_requested:true` and a future
 `lease_expires_at_unix_ms`, alongside the existing recording identity and
 telemetry directory. Legacy static payloads do not override editor-off policy.
-Discovery continues independently of collection and gameplay clocks. A valid
+Discovery continues independently of collection and gameplay clocks in editor,
+standalone and packaged hosts. A valid
 recording can attach during an already-running Play session; successive
 recordings retain the Play-session ID while changing the recording UUID.
 
@@ -44,7 +45,10 @@ baselines. Dormant integrations retain providers and object handles without
 sampling. Detach stops admitting recording events, while data already accepted
 can drain afterward. Queued records never acquire the next recording's UUID.
 Interactive editors validate an optional `editor_pid`; standalone child Play is
-project-scoped without a direct editor PID comparison.
+project-scoped without a direct editor PID comparison. Observing a live capture
+handoff is independent of telemetry attachment: QR suppression still applies
+when collection is blocked by policy or missing configuration. An expired or
+closed handoff cannot keep suppressing the marker.
 
 An expired lease suspends association and marks an interruption. It does not
 emit a final completion until authoritative closure, replacement, or Play exit.
