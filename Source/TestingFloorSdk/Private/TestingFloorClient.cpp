@@ -1069,13 +1069,23 @@ void FClient::UpdateRecordingContext(bool bForce)
 {
 	if (bShutdown || bRefreshingRecording) return;
 	TGuardValue<bool> Guard(bRefreshingRecording, true);
-	CheckRecordingClosed();
 	const FDateTime Now = Clock();
-	const bool bCachedLeaseExpired = Settings.Recording.IsSet() && !bRecordingClosed
+	const bool bCachedLeaseExpired = Settings.Recording.IsSet() && !bRecordingClosed && !bRecordingSuspended
 		&& Settings.Recording->LeaseVersion != 0 && !Settings.Recording->HasActiveLease(Now);
-	if (!bForce && Now < NextRecordingPoll && !bCachedLeaseExpired) return;
-	NextRecordingPoll = Now + FTimespan::FromMilliseconds(250);
-	TOptional<FRecordingContext> Candidate = RecordingSource ? RecordingSource(Now) : Settings.Recording;
+	const bool bPollSource = bForce || Now >= NextRecordingPoll || bCachedLeaseExpired;
+	TOptional<FRecordingContext> Candidate;
+	if (bPollSource)
+	{
+		NextRecordingPoll = Now + FTimespan::FromMilliseconds(250);
+		Candidate = RecordingSource ? RecordingSource(Now) : Settings.Recording;
+		if (Candidate.IsSet() && Settings.Recording.IsSet() && Candidate->RecordingUUID == Settings.Recording->RecordingUUID && !bRecordingClosed)
+		{
+			Settings.Recording = Candidate;
+		}
+	}
+	// Refresh a matching lease before closing, so a loading hitch cannot skip accepted buffered rows.
+	CheckRecordingClosed();
+	if (!bPollSource) return;
 	if (Candidate.IsSet() && CompletedRecordings.Contains(Candidate->RecordingUUID)) Candidate.Reset();
 	if (Candidate.IsSet() && (!Settings.Recording.IsSet() || Candidate->RecordingUUID != Settings.Recording->RecordingUUID))
 	{
@@ -1122,6 +1132,7 @@ void FClient::CheckRecordingClosed()
 	if (Settings.Recording.IsSet() && !bRecordingClosed && !Settings.Recording->TelemetryDirectory.IsEmpty()
 		&& IFileManager::Get().FileExists(*(Settings.Recording->TelemetryDirectory / TEXT("closed.json"))))
 	{
+		if (Settings.Recording->LeaseVersion != 0 && !Settings.Recording->HasActiveLease(Clock())) bRecordingInterrupted = true;
 		if (IsCollecting()) SendBufferedRecords(false);
 		FinishRecording();
 	}

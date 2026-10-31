@@ -565,4 +565,73 @@ bool FTestingFloorTeleportRecordingBoundaryTest::RunTest(const FString& Paramete
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRenewedLeaseCloseBufferTest, "TestingFloor.Sdk.RenewedLeaseClosesBufferedObjectsAfterHitch", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRenewedLeaseCloseBufferTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	const auto Transport = MakeShared<TestingFloorRecordingTests::FCapturingTransport>();
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, Transport, [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	const uint64 Object = Client->TrackObject(TEXT("object"), [] { return TOptional<FVector>(FVector::ZeroVector); }, TEXT("example-object"));
+	Client->Tick(0.0);
+	Client->RemoveObject(Object, TEXT("destroyed"));
+	Now += FTimespan::FromSeconds(6);
+	Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Client->Tick(6.0);
+	for (int32 Attempt = 0; Attempt < 10 && Client->GetPendingEventCount() > 0; ++Attempt) Client->Flush();
+	bool bFoundRemoval = false;
+	bool bCompleted = false;
+	for (const FString& BodyJson : Transport->Bodies)
+	{
+		for (const auto& Value : TestingFloorRecordingTests::Parse(BodyJson)->GetArrayField(TEXT("events")))
+		{
+			const auto Event = Value->AsObject();
+			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_objects"))
+			{
+				const TArray<TSharedPtr<FJsonValue>>* RemovedIDs = nullptr;
+				if (Event->TryGetArrayField(TEXT("removed.id"), RemovedIDs) && RemovedIDs && !RemovedIDs->IsEmpty())
+				{
+					bFoundRemoval = true;
+					TestFalse(TEXT("Accepted removals precede completion"), bCompleted);
+					TestEqual(TEXT("Removal remains attached to the closing recording"), Event->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("recording_uuid")), FString(TEXT("example-recording")));
+				}
+			}
+			if (Event->GetStringField(TEXT("$name")) == TEXT("$tf_telemetry_complete"))
+			{
+				bCompleted = true;
+				TestFalse(TEXT("A continuously renewed lease is not interrupted at closure"), Event->GetBoolField(TEXT("interrupted")));
+			}
+		}
+	}
+	TestTrue(TEXT("Buffered object removal survives the hitch and closure"), bFoundRemoval);
+	TestTrue(TEXT("Recording completes after draining accepted objects"), bCompleted);
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorSuspendedLeasePollingTest, "TestingFloor.Sdk.SuspendedLeasePollingRemainsThrottled", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorSuspendedLeasePollingTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current = TestingFloorRecordingTests::Lease(TEXT("example-recording"), Directory, Now);
+	int32 SourceReads = 0;
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(), [&Now] { return Now; }, [&Current, &SourceReads](FDateTime) { ++SourceReads; return Current; });
+	Client->Tick(0.0);
+	Now += FTimespan::FromSeconds(6);
+	Client->Tick(6.0);
+	const int32 ReadsAtSuspension = SourceReads;
+	for (int32 Index = 0; Index < 100; ++Index) Client->Track(TEXT("ignored-while-suspended"));
+	TestEqual(TEXT("Repeated dormant calls do not repeatedly read an expired source"), SourceReads, ReadsAtSuspension);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(6.25);
+	TestEqual(TEXT("Suspended discovery resumes on the bounded cadence"), SourceReads, ReadsAtSuspension + 1);
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
 #endif
