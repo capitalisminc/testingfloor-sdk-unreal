@@ -2,7 +2,9 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformProcess.h"
+#include "Misc/ScopeExit.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -299,6 +301,68 @@ TestingFloor::FRecordingContext Lease(const FString& ID, const FString& Director
 	IFileManager::Get().MakeDirectory(*Directory, true);
 	return Result;
 }
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorUnregisteredRecordingTest, "TestingFloor.Sdk.RecordingAttachesWithoutRegistration", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorUnregisteredRecordingTest::RunTest(const FString& Parameters)
+{
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	IFileManager::Get().MakeDirectory(*Directory, true);
+	ON_SCOPE_EXIT
+	{
+		PlatformFile.SetReadOnly(*Directory, false);
+		IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	};
+	// A sandboxed macOS app can read the recorder's directory but cannot create files in it.
+	PlatformFile.SetReadOnly(*Directory, true);
+	if (FFileHelper::SaveStringToFile(TEXT(""), *(Directory / TEXT("probe"))))
+	{
+		AddInfo(TEXT("This platform cannot make a directory unwritable, so the test was skipped."));
+		return true;
+	}
+	auto Settings = TestingFloorRecordingTests::Settings();
+	TestingFloor::FRecordingContext Recording;
+	Recording.RecordingUUID = TEXT("example-recording");
+	Recording.TelemetryDirectory = Directory;
+	Settings.Recording = Recording;
+	const auto Transport = MakeShared<TestingFloorRecordingTests::FCapturingTransport>();
+	const auto Client = TestingFloor::FClient::Create(Settings, {}, Transport);
+	const auto SentEvent = [&Transport](const FString& Name)
+	{
+		TSharedPtr<FJsonObject> Found;
+		for (const FString& Body : Transport->Bodies)
+		{
+			const auto Batch = TestingFloorRecordingTests::Parse(Body);
+			for (const auto& Event : Batch->GetArrayField(TEXT("events")))
+			{
+				if (Event->AsObject()->GetStringField(TEXT("$name")) == Name) Found = Event->AsObject();
+			}
+		}
+		return Found;
+	};
+	TestFalse(TEXT("The Play run cannot register"), IFileManager::Get().FileExists(*(Directory / (Client->GetPlaySessionID() + TEXT(".session")))));
+	TF_REQUIRE_TRUE(Client->GetRecordingContext().IsSet(), "The recording attaches without registration");
+	Client->Track(TEXT("gameplay"));
+	Client->Flush();
+	const auto Gameplay = SentEvent(TEXT("gameplay"));
+	TF_REQUIRE_TRUE(Gameplay.IsValid(), "Gameplay is sent");
+	TestEqual(TEXT("Gameplay carries the recording"), Gameplay->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("recording_uuid")), Recording.RecordingUUID);
+	PlatformFile.SetReadOnly(*Directory, false);
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Client->Tick(1.0);
+	Client->Flush();
+	const auto Marker = SentEvent(TEXT("$tf_telemetry_complete"));
+	TF_REQUIRE_TRUE(Marker.IsValid(), "Closure still sends the completion marker");
+	TestEqual(TEXT("The marker names the recording"), Marker->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("recording_uuid")), Recording.RecordingUUID);
+	TestEqual(TEXT("The marker reports no losses"), Marker->GetIntegerField(TEXT("dropped_events")), 0);
+	Client->Track(TEXT("after_recording"));
+	Client->Flush();
+	const auto Later = SentEvent(TEXT("after_recording"));
+	TF_REQUIRE_TRUE(Later.IsValid(), "Gameplay after closure is sent");
+	TestFalse(TEXT("Gameplay after closure is not attached"), Later->GetObjectField(TEXT("$tf"))->HasField(TEXT("recording_uuid")));
+	Client->Shutdown(0.0);
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecordingOnlyPolicyTest, "TestingFloor.Sdk.RecordingOnlyEditorPolicy", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)

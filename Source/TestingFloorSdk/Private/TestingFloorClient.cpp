@@ -1298,6 +1298,7 @@ bool FClient::AttachRecording(const FRecordingContext& Recording)
 		WriteRecordingStatus(Recording, State == EState::NotConfigured ? TEXT("not_configured") : TEXT("disabled"), Reason);
 		return false;
 	}
+	bool bUnregistered = false;
 	if (!Recording.TelemetryDirectory.IsEmpty())
 	{
 		if (!IFileManager::Get().DirectoryExists(*Recording.TelemetryDirectory)
@@ -1307,11 +1308,13 @@ bool FClient::AttachRecording(const FRecordingContext& Recording)
 			CompletedRecordings.Add(Recording.RecordingUUID);
 			return false;
 		}
-		// The recorder publishes closure before enumerating these registrations.
-		if (!FFileHelper::SaveStringToFile(TEXT(""), *(Recording.TelemetryDirectory / (SessionID + TEXT(".session")))))
+		// The recorder publishes closure before enumerating these registrations. A host that can read
+		// the directory but not write to it, such as a sandboxed macOS app, still attaches: consumers
+		// find the run by its recording UUID, and closed.json and the completion marker still apply.
+		bUnregistered = !FFileHelper::SaveStringToFile(TEXT(""), *(Recording.TelemetryDirectory / (SessionID + TEXT(".session"))));
+		if (bUnregistered)
 		{
-			WriteRecordingStatus(Recording, TEXT("disabled"), TEXT("registration_failed"));
-			return false;
+			UE_LOG(LogTestingFloor, Warning, TEXT("Testing Floor could not register this Play run in the recording's telemetry directory; events still carry the recording."));
 		}
 	}
 	Settings.Recording = Recording;
@@ -1324,7 +1327,7 @@ bool FClient::AttachRecording(const FRecordingContext& Recording)
 		FinishRecording();
 		return false;
 	}
-	WriteRecordingStatus(Recording, TEXT("attached"), TEXT("none"));
+	WriteRecordingStatus(Recording, TEXT("attached"), bUnregistered ? TEXT("registration_failed") : TEXT("none"));
 	return true;
 }
 
