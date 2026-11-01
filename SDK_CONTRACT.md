@@ -79,10 +79,16 @@ ask whether the SDK is collecting, with a machine-readable reason when it is not
 
 The recorder supplies `telemetry_directory` in the recording handoff. It creates
 this directory and keeps it for the recording. Each SDK Play run registers by
-creating `<play-session-id>.session` before admitting recording events. If
-`closed.json` already exists, it admits no recording events. The recorder writes
-`closed.json` before taking its final participant list, so a concurrent Play boot
-cannot produce an undiscovered run.
+creating `<play-session-id>.session` before admitting recording events. If the
+directory is missing or `closed.json` already exists, it admits no recording
+events. The recorder writes `closed.json` before taking its final participant
+list, so a concurrent Play boot cannot produce an undiscovered run.
+
+Registration is best effort. A Play run that can read the directory but cannot
+write to it, such as a sandboxed macOS app, still admits recording events,
+watches `closed.json` and sends the completion marker. It is missing from the
+recorder's participant list, so consumers find it by the recording UUID on its
+events.
 
 The SDK watches `closed.json` while Play continues. Closing the recording or
 shutting down a Play run stops attaching new events to that recording and queues
@@ -94,10 +100,11 @@ Drop and completion bookkeeping is scoped by recording UUID and Play-session ID,
 including when data for an earlier recording is still draining.
 
 The receiver acknowledges batches only after its warehouse write succeeds.
-Seeing every registered participant's marker in the warehouse therefore closes
-the recording's delivery barrier. An empty participant list is explicit. Crashes
-or failed shutdown flushes can leave a participant without a marker; consumers
-must use a bounded timeout and preserve the incomplete status.
+Seeing a marker from every registered participant, and from every other run whose
+events carry the recording UUID, therefore closes the recording's delivery
+barrier. An empty participant list with no such runs means the recording has no
+telemetry. Crashes or failed shutdown flushes can leave a participant without a
+marker; consumers must use a bounded timeout and preserve the incomplete status.
 
 ## Event capture and properties
 

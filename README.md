@@ -317,6 +317,15 @@ to the command line and legacy sidecar JSON supplied by your game. The desktop
 app owns sidecar file lifetime. Static handoffs older than 12 hours are ignored;
 a live renewable lease remains valid beyond that static age limit.
 
+Unreal signs packaged macOS games with App Sandbox entitlements by default. A
+sandboxed game can read the desktop app's recording directory but cannot register
+its Play run there. The SDK still attaches the recording, watches for its end and
+sends the completion marker, and Testing Floor finds the run by its recording ID.
+The game does need `com.apple.security.network.client` to send telemetry at all.
+Unreal's default Development entitlements include it; its default Shipping
+entitlements do not. In **Project Settings > Platforms > Xcode Projects**, set
+**Mac: Entitlements (Shipping config override)** to a file that includes it.
+
 For external video capture, `TestingFloor/TestingFloorQr.h` provides
 `FQrPolicy`, `FQrHeartbeat`, and QR pixel generation. Your game renders the
 overlay and ticks it during pause. QR is opt-in and defaults to an inverted,

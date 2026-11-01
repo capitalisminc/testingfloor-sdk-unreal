@@ -7,6 +7,7 @@
 - Preserve Play identity and immutable event association while isolating recording completion/drop counts.
 - Refuse `Track` event names that begin with `$tf_` in any casing, which the telemetry contract reserves for Testing Floor records, with one warning per name. Refusals count in `GetDroppedEventCount` while collecting, but not toward a recording's `dropped_events`. Before, a game event named `$tf_telemetry_complete` was batched as a completion marker and, without a recording, failed a check on flush.
 - Acknowledge SDK participation through local status and preserve interruption evidence in completion markers.
+- Attach a recording when the Play run cannot create its registration file in the recording's telemetry directory, as in a sandboxed macOS game. Events still carry the recording, closure still sends the completion marker, and a warning is logged. Before, the SDK refused the recording, so none of the run's telemetry was linked to it.
 - Ship an unedited copy of the Testing Floor telemetry contract in `Tests/Contract`. `TestingFloor.Sdk.Contract` automation tests fail when the envelope, `$tf` keys, record names, tracked-object fields, SDK properties or limits differ from it.
 
 ### Aligned with the Unity SDK
