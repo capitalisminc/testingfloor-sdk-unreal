@@ -192,6 +192,7 @@ public:
 	void SetEventProcessor(FContextProvider Processor);
 	void SetMovementSettings(const FMovementSettings& Settings);
 	void SetMovementTrackingEnabled(bool bEnabled);
+	/** Queue a game event. Names beginning with `$tf_` are reserved for Testing Floor records and are refused. */
 	bool Track(const FString& Name, const FProperties& Properties = {});
 	/** Tick with monotonic real time, including during gameplay pause. */
 	void Tick();
@@ -305,6 +306,7 @@ private:
 	double NextRetrySeconds = 0.0;
 	double RetryDelaySeconds = 1.0;
 	int32 DroppedEvents = 0;
+	bool bWarnedReservedName = false;
 	bool bRequestInFlight = false;
 	bool bShutdown = false;
 	bool bFlushRequested = false;

@@ -144,6 +144,30 @@ bool FTestingFloorPayloadTest::RunTest(const FString& Parameters)
 }
 
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorReservedNameTest, "TestingFloor.Sdk.ReservedEventNames", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorReservedNameTest::RunTest(const FString& Parameters)
+{
+	const auto Transport = MakeShared<TestingFloorClientTests::FTransport>();
+	const auto Client = TestingFloor::FClient::Create(TestingFloorClientTests::Settings(), {}, Transport);
+	AddExpectedMessage(TEXT("reserved for Testing Floor records"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+	// Without a recording, a queued game event with the completion marker's name made Flush read an unset recording.
+	TestFalse(TEXT("Completion marker name refused"), Client->Track(TEXT("$tf_telemetry_complete")));
+	TestFalse(TEXT("Other platform record names refused"), Client->Track(TEXT("$tf_state")));
+	TestFalse(TEXT("Prefix case is ignored, like the SDK's record name checks"), Client->Track(TEXT("$TF_TELEMETRY_COMPLETE")));
+	TestEqual(TEXT("Refused events are not drops"), Client->GetDroppedEventCount(), 0);
+	TF_REQUIRE_TRUE(Client->GetPendingEventCount() == 0, "Refused events are not queued");
+	TestTrue(TEXT("Names without the reserved prefix are game events"), Client->Track(TEXT("tf_telemetry_complete")));
+	Client->Flush();
+	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 1, "Client still sends after a refusal");
+	const auto Events = TestingFloorClientTests::ParseEvents(Transport->Bodies[0]);
+	TF_REQUIRE_TRUE(Events.Num() == 1, "Only the game event is sent");
+	TestEqual(TEXT("Game event name"), Events[0]->GetStringField(TEXT("$name")), FString(TEXT("tf_telemetry_complete")));
+	const auto Second = TestingFloor::FClient::Create(TestingFloorClientTests::Settings(), {}, MakeShared<TestingFloorClientTests::FTransport>());
+	TestFalse(TEXT("Each client warns once"), Second->Track(TEXT("$tf_objects")));
+	return true;
+}
+
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRetryTest, "TestingFloor.Sdk.RetryRetainsEventIdentity", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorRetryTest::RunTest(const FString& Parameters)
 {

@@ -32,6 +32,8 @@ constexpr int32 ObjectRecordMaxSamples = 300;
 constexpr int32 ObjectRecordByteBudget = 20 << 10;
 constexpr int32 CoordinateBytes = 12;
 constexpr int32 NumberBytes = 25;
+/** The telemetry contract reserves event names with this prefix for platform records. */
+const TCHAR* const ReservedEventPrefix = TEXT("$tf_");
 const TCHAR* const StateRecordName = TEXT("$tf_state");
 const TCHAR* const ObjectsRecordName = TEXT("$tf_objects");
 
@@ -731,6 +733,16 @@ bool FClient::IsCollecting() const
 bool FClient::Track(const FString& Name, const FProperties& Properties)
 {
 	check(IsInGameThread());
+	// The SDK queues its own records directly. Its record name checks ignore case, so any casing is refused.
+	if (Name.StartsWith(Private::ReservedEventPrefix, ESearchCase::IgnoreCase))
+	{
+		if (!bWarnedReservedName)
+		{
+			bWarnedReservedName = true;
+			UE_LOG(LogTestingFloor, Warning, TEXT("Testing Floor ignores event \"%s\": names beginning with $tf_ are reserved for Testing Floor records."), *Name);
+		}
+		return false;
+	}
 	UpdateRecordingContext(false);
 	if (!IsCollecting() || Name.TrimStartAndEnd().IsEmpty())
 	{

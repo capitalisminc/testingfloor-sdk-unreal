@@ -5,6 +5,7 @@
 - Enable editor telemetry only while a live desktop recording is attached, with a separate opt-out and all existing master/configuration/automation gates.
 - Attach to already-running Play, suspend on expired recording leases, renew with fresh state/object keyframes, and record again without restarting Play.
 - Preserve Play identity and immutable event association while isolating recording completion/drop counts.
+- Refuse `Track` event names that begin with `$tf_`, which the telemetry contract reserves for Testing Floor records, with one warning per client. Before, a game event named `$tf_telemetry_complete` was batched as a completion marker and, without a recording, failed a check on flush.
 - Acknowledge SDK participation through local status and preserve interruption evidence in completion markers.
 
 ## 0.4.0 — Unreleased
