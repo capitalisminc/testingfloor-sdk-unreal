@@ -301,6 +301,40 @@ bool FTestingFloorMovementTeleportTest::RunTest(const FString& Parameters)
 }
 
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorOrthographicZoomTest, "TestingFloor.Sdk.MovementOrthographicZoom", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorOrthographicZoomTest::RunTest(const FString& Parameters)
+{
+	auto Settings = TestingFloorClientTests::Settings();
+	Settings.bMovementTracking = true;
+	Settings.FlushIntervalSeconds = 1000.0;
+	const auto Client = TestingFloor::FClient::Create(Settings, {}, MakeShared<TestingFloorClientTests::FTransport>());
+	TestingFloor::FActivitySample Sample;
+	Sample.CameraRotation = FRotator(-90.0, 0.0, 0.0).Quaternion();
+	Sample.CameraOrthoWidth = 2000.0;
+	Client->SetActivitySource([&Sample] { return Sample; });
+	Client->Tick(0.0);
+	// Only the view width changes: 1 m, 1 m, then 2 m.
+	Sample.CameraOrthoWidth = 2100.0;
+	Client->Tick(0.1);
+	Sample.CameraOrthoWidth = 2200.0;
+	Client->Tick(0.2);
+	Sample.CameraOrthoWidth = 2400.0;
+	Client->Tick(0.8);
+	Client->Tick(1.1);
+	const auto Moves = Client->GetQueuedEvents().FilterByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("player_moved"); });
+	TF_REQUIRE_TRUE(Moves.Num() == 3, "Zooming alone produces start, ping, stop");
+	const auto Delta = [](const TestingFloor::FEvent& Event)
+	{
+		const TSharedPtr<FJsonValue>* Value = Event.Properties.GetValues().Find(TEXT("movement.ortho_width_delta"));
+		return Value && Value->IsValid() ? (*Value)->AsNumber() : 0.0;
+	};
+	TestEqual(TEXT("Start has no metrics"), Delta(Moves[0]), 0.0);
+	TestEqual(TEXT("Ping reports the zoom since start, in meters"), Delta(Moves[1]), 2.0);
+	TestEqual(TEXT("Stop reports the whole run's zoom"), Delta(Moves[2]), 4.0);
+	TestFalse(TEXT("Zooming is not a field-of-view change"), Moves[1].Properties.GetValues().Contains(TEXT("movement.fov_delta")));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecordingTest, "TestingFloor.Sdk.PlaySessionAndShutdown", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorRecordingTest::RunTest(const FString& Parameters)
 {

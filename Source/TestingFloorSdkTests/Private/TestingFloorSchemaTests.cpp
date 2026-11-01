@@ -164,6 +164,45 @@ bool FTestingFloorSequenceTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorOrthographicCameraTest, "TestingFloor.Sdk.Schema2.OrthographicCamera", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorOrthographicCameraTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	const auto Client = Create(Settings());
+	TestingFloor::FActivitySample Sample;
+	Sample.CameraPosition = FVector(-1000.0, 0.0, 1000.0);
+	Sample.CameraRotation = FRotator(-52.0, -130.0, 0.0).Quaternion();
+	Sample.CameraFOV = 90.0;
+	Sample.CameraOrthoWidth = 2000.0;
+	Sample.CameraFocus = FVector(100.0, 200.0, 0.0);
+	Client->SetActivitySource([&Sample] { return Sample; });
+
+	Client->Track(TEXT("unit_selected"));
+	auto All = Records(*Client);
+	TF_REQUIRE_TRUE(All.Num() == 2, "One state record, then the event");
+	TestEqual(TEXT("An orthographic camera's projection is its only state"), Keys(All[0]), FString(TEXT("camera.projection")));
+	TestEqual(TEXT("Projection"), All[0]->GetStringField(TEXT("camera.projection")), FString(TEXT("orthographic")));
+	const TSharedPtr<FJsonObject>& Event = All[1];
+	TestEqual(TEXT("The view width is sent"), Event->GetNumberField(TEXT("camera.ortho_width")), 2000.0);
+	TestFalse(TEXT("It replaces the field of view"), Event->HasField(TEXT("camera.fov")));
+	TestEqual(TEXT("The focus is sent"), Event->GetNumberField(TEXT("camera.focus.y")), 200.0);
+	TestTrue(TEXT("A camera tilted down has an up vector leaning up"), Event->GetNumberField(TEXT("camera.up.z")) > 0.5);
+	TestTrue(TEXT("Up is perpendicular to forward"), FMath::IsNearlyZero(
+		Event->GetNumberField(TEXT("camera.up.x")) * Event->GetNumberField(TEXT("camera.forward.x"))
+		+ Event->GetNumberField(TEXT("camera.up.y")) * Event->GetNumberField(TEXT("camera.forward.y"))
+		+ Event->GetNumberField(TEXT("camera.up.z")) * Event->GetNumberField(TEXT("camera.forward.z")), 0.0001));
+
+	Sample.CameraOrthoWidth.Reset();
+	Client->Track(TEXT("unit_selected"));
+	All = Records(*Client);
+	TF_REQUIRE_TRUE(All.Num() == 4, "Switching projection queues a state change before the next event");
+	TestEqual(TEXT("A perspective camera sends its projection and FOV axis"), Keys(All[2]), FString(TEXT("camera.fov_axis,camera.projection")));
+	TestEqual(TEXT("Projection changes"), All[2]->GetStringField(TEXT("camera.projection")), FString(TEXT("perspective")));
+	TestEqual(TEXT("The field of view returns"), All[3]->GetNumberField(TEXT("camera.fov")), 90.0);
+	TestFalse(TEXT("The view width is gone"), All[3]->HasField(TEXT("camera.ortho_width")));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorStateDiffTest, "TestingFloor.Sdk.Schema2.StateDiffsAndOrdering", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorStateDiffTest::RunTest(const FString& Parameters)
 {
@@ -189,8 +228,9 @@ bool FTestingFloorStateDiffTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("The first state record is a keyframe"), IsKeyframe(Keyframe));
 	TestEqual(TEXT("State seq precedes the event's"), Seq(Keyframe) + 1, Seq(Event));
 	TestEqual(TEXT("State and event share the event's time"), Keyframe->GetStringField(TEXT("$time")), Event->GetStringField(TEXT("$time")));
-	TestEqual(TEXT("Keyframe holds every state value and the SDK's own viewport and FOV axis, and nothing else"), Keys(Keyframe),
-		FString(TEXT("camera.fov_axis,difficulty,inventory.items,player.outfit.id,pref.dlss_enabled,viewport.height,viewport.width")));
+	TestEqual(TEXT("Keyframe holds every state value and the SDK's own viewport, projection and FOV axis, and nothing else"), Keys(Keyframe),
+		FString(TEXT("camera.fov_axis,camera.projection,difficulty,inventory.items,player.outfit.id,pref.dlss_enabled,viewport.height,viewport.width")));
+	TestEqual(TEXT("A camera with a field of view is perspective"), Keyframe->GetStringField(TEXT("camera.projection")), FString(TEXT("perspective")));
 	TestEqual(TEXT("SDK viewport state"), Keyframe->GetIntegerField(TEXT("viewport.width")), 1920);
 	TestTrue(TEXT("Event keeps context"), Event->HasField(TEXT("game_level.id")) && Event->HasField(TEXT("player.hp")));
 	TestTrue(TEXT("Event keeps player position and camera FOV"), Event->HasField(TEXT("player.position.x")) && Event->HasField(TEXT("camera.fov")));

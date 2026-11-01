@@ -200,16 +200,22 @@ can lose events. Pending and dropped counters provide local diagnostics.
 | Default world units per meter | 1 | 100 |
 
 Every available player or camera sample attaches `player.position.*`,
-`camera.position.*`, `camera.euler.*`, `camera.forward.*`, and `camera.fov` to
-events. `camera.fov_axis` and `viewport.width` / `viewport.height` are session
-state. Missing sources omit their fields. Native camera Euler conventions differ;
-use `camera.forward` and the map's configured axes for spatial projection.
+`camera.position.*`, `camera.euler.*`, `camera.forward.*` and `camera.up.*` to
+events, with `camera.fov` for a perspective camera or `camera.ortho_width`, the
+view's width in native units, for an orthographic one. A game can supply the
+point at the center of the view, such as a strategy camera's pivot, sent as
+`camera.focus.*`. `camera.projection` (`perspective` or `orthographic`),
+`camera.fov_axis` (perspective only) and `viewport.width` / `viewport.height`
+are session state. Missing sources omit their fields. Native camera Euler
+conventions differ; use `camera.forward` and the map's configured axes for
+spatial projection.
 
 Movement defaults off. Opting in emits debounced `player_moved` events for
-player movement or camera-only position, rotation, and FOV changes. Reasons are
-`start`, `ping`, and `stop`. Ping metrics cover the segment since the previous
-ping; stop metrics cover the whole run. Zero movement must remain still, even
-when a threshold is zero. Sampling and QR timing continue while gameplay pauses.
+player movement or camera-only position, rotation, FOV and orthographic width
+changes. Reasons are `start`, `ping`, and `stop`. Ping metrics cover the segment
+since the previous ping; stop metrics cover the whole run. Zero movement must
+remain still, even when a threshold is zero. Sampling and QR timing continue
+while gameplay pauses.
 
 Teleport scopes suppress movement sampling and reset it at the destination.
 `player_teleported` carries `teleport.kind=teleport`, optional `teleport.reason`,
@@ -239,7 +245,7 @@ Every record is sent with `$schema: 2` and `$tf.seq`: a counter that starts at 1
 - A value set directly with `SetState` accepts the same types as a provider: string, integer, double, boolean, string list and integer list. A direct value replaces the provider's value for the same key.
 - The SDK reads state providers before each event and once a second, in unscaled time, including while gameplay is paused. If a value changed, it queues one `$tf_state` record that holds only the changed keys, before the event. A removed key is sent as `null`.
 - A keyframe repeats every current value and sets `$tf.keyframe: true`. The SDK sends one when the play session starts, when a recording starts, every 5 minutes, and after it drops any record.
-- The SDK sends its device, engine and build fields in `$tf` on every record, not as state. State carries `viewport.width`, `viewport.height` and `camera.fov_axis` and the game's state values. Camera pose, `camera.fov` and the player position stay on events.
+- The SDK sends its device, engine and build fields in `$tf` on every record, not as state. State carries `viewport.width`, `viewport.height`, `camera.projection` and `camera.fov_axis` and the game's state values. Camera pose, `camera.fov`, `camera.ortho_width` and the player position stay on events.
 - `$tf_state` records carry no context-provider values and no player or camera fields.
 
 ### Tracked objects (`$tf_objects`)
