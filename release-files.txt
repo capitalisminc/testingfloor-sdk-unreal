@@ -8,13 +8,17 @@ Source/TestingFloorSdk/Private/TestingFloorClient.cpp
 Source/TestingFloorSdk/Private/TestingFloorHttpTransport.cpp
 Source/TestingFloorSdk/Private/TestingFloorQr.cpp
 Source/TestingFloorSdk/Private/TestingFloorSdkModule.cpp
+Source/TestingFloorSdk/Private/TestingFloorTrackedObjectComponent.cpp
 Source/TestingFloorSdk/Private/ThirdParty/QrCodeGenerator/README.md
 Source/TestingFloorSdk/Private/ThirdParty/QrCodeGenerator/qrcodegen.c
 Source/TestingFloorSdk/Private/ThirdParty/QrCodeGenerator/qrcodegen.h
 Source/TestingFloorSdk/Public/TestingFloor/TestingFloorClient.h
 Source/TestingFloorSdk/Public/TestingFloor/TestingFloorQr.h
+Source/TestingFloorSdk/Public/TestingFloor/TestingFloorTrackedObjectComponent.h
 Source/TestingFloorSdk/TestingFloorSdk.Build.cs
 Source/TestingFloorSdkTests/Private/TestingFloorContractTests.cpp
+Source/TestingFloorSdkTests/Private/TestingFloorEngineContextTests.cpp
+Source/TestingFloorSdkTests/Private/TestingFloorObjectLifetimeTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorQrTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorRecordingTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorSchemaTests.cpp

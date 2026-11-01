@@ -8,6 +8,9 @@
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "HAL/FileManager.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include <limits>
 
 namespace TestingFloorClientTests
@@ -140,6 +143,44 @@ bool FTestingFloorPayloadTest::RunTest(const FString& Parameters)
 	const TSharedPtr<FJsonObject>* Metadata = nullptr;
 	TF_REQUIRE_TRUE(Payload->TryGetObjectField(TEXT("$tf"), Metadata) && Metadata && Metadata->IsValid(), "SDK metadata object");
 	TestEqual(TEXT("SDK metadata"), (*Metadata)->GetStringField(TEXT("sdk_version")), FString(TEXT("0.5.0")));
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorReservedNameTest, "TestingFloor.Sdk.ReservedEventNames", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorReservedNameTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	IFileManager::Get().MakeDirectory(*Directory, true);
+	auto Settings = TestingFloorClientTests::Settings();
+	TestingFloor::FRecordingContext Recording;
+	Recording.RecordingUUID = TEXT("example-recording");
+	Recording.TelemetryDirectory = Directory;
+	Settings.Recording = Recording;
+	const auto Transport = MakeShared<TestingFloorClientTests::FTransport>();
+	const auto Client = TestingFloor::FClient::Create(Settings, {}, Transport);
+	AddExpectedMessage(TEXT("reserved for Testing Floor records"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 3);
+	// Without a recording, a queued game event with the completion marker's name made Flush read an unset recording.
+	TestFalse(TEXT("Completion marker name refused"), Client->Track(TEXT("$tf_telemetry_complete")));
+	TestFalse(TEXT("Other platform record names refused"), Client->Track(TEXT("$tf_state")));
+	TestFalse(TEXT("Prefix case is ignored, like the SDK's record name checks"), Client->Track(TEXT("$TF_TELEMETRY_COMPLETE")));
+	TestFalse(TEXT("A name already warned about is refused again, without another warning"), Client->Track(TEXT("$tf_state")));
+	TestEqual(TEXT("Each refusal counts as a local drop"), Client->GetDroppedEventCount(), 4);
+	TF_REQUIRE_TRUE(Client->GetPendingEventCount() == 0, "Refused events are not queued");
+	TestTrue(TEXT("Names without the reserved prefix are game events"), Client->Track(TEXT("tf_telemetry_complete")));
+	Client->Flush();
+	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 1, "Client still sends after a refusal");
+	const auto Events = TestingFloorClientTests::ParseEvents(Transport->Bodies[0]);
+	TF_REQUIRE_TRUE(Events.Num() == 1, "Only the game event is sent");
+	TestEqual(TEXT("Game event name"), Events[0]->GetStringField(TEXT("$name")), FString(TEXT("tf_telemetry_complete")));
+	TF_REQUIRE_TRUE(Transport->Complete(200, true), "Batch acknowledged");
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Client->Tick(1.0);
+	TF_REQUIRE_TRUE(Transport->Bodies.Num() == 2, "Closing sends the completion marker");
+	const auto Marker = TestingFloorClientTests::ParseEvents(Transport->Bodies[1]);
+	TF_REQUIRE_TRUE(Marker.Num() == 1, "Marker alone");
+	TestEqual(TEXT("Refused names are not recording drops"), Marker[0]->GetIntegerField(TEXT("dropped_events")), 0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
 	return true;
 }
 
