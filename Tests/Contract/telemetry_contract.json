@@ -1,0 +1,160 @@
+{
+  "contract_version": 1,
+  "about": "The fields and record names that Testing Floor's collector, game SDKs, desktop app and web app agree on. This file is the single source: code reads names from it, tests fail on names it does not declare, and the public telemetry field reference is generated from it. It contains no customer data and may be copied into SDK and collector repositories.",
+  "wire_schema_version": 2,
+  "accepted_wire_schema_versions": [1, 2],
+  "endpoint": {
+    "method": "POST",
+    "url": "https://dataentry.testingfloor.com/v1/batch",
+    "content_type": "application/json",
+    "acknowledgement": "The collector answers 2xx only after the batch is written to the warehouse. Retry network failures, 408, 429 and 5xx with the same event IDs. 401 and 403 mean the telemetry key was refused. Other 4xx responses reject an invalid batch."
+  },
+  "limits": [
+    { "key": "event_bytes", "value": 32768, "description": "Largest serialized event the collector accepts." },
+    { "key": "request_bytes", "value": 1048576, "description": "Largest request body the collector accepts." },
+    { "key": "events_per_request", "value": 2000, "description": "Most events in one request." },
+    { "key": "live_tracked_objects", "value": 256, "description": "Default SDK limit on objects tracked at once." },
+    { "key": "object_samples_per_record", "value": 300, "description": "Most object samples in one tracked-objects record. A larger check is split into several records with the same time." },
+    { "key": "object_record_bytes", "value": 20480, "description": "SDK target size for one tracked-objects record." }
+  ],
+  "value_types": {
+    "allowed": ["string", "integer", "number", "boolean", "string[]", "integer[]"],
+    "rules": [
+      "Numbers must be finite. SDKs drop NaN and infinite values.",
+      "Null values are dropped from gameplay events. In session state, null removes a key.",
+      "Nested objects are not supported. Flatten them into dot-separated keys such as player.position.x.",
+      "GUIDs and enums are sent as strings."
+    ]
+  },
+  "request_fields": [
+    { "key": "$write_key", "required": true, "type": "string", "description": "The game's telemetry key for the environment being tested. It is not an account API key." },
+    { "key": "$sent_at", "required": false, "type": "timestamp", "description": "When the client sent the request, as an ISO 8601 UTC time." },
+    { "key": "events", "required": true, "type": "object[]", "description": "The events in this request, each with the event fields below." }
+  ],
+  "event_fields": [
+    { "key": "$id", "required": true, "type": "string", "description": "A new UUID for every event. Retries reuse it, so the warehouse can drop duplicates." },
+    { "key": "$name", "required": true, "type": "string", "description": "The event name, such as level_started. Names beginning with $tf_ are reserved for the records listed under platform records." },
+    { "key": "$time", "required": true, "type": "timestamp", "description": "When the event happened, as an ISO 8601 UTC time with milliseconds." },
+    { "key": "$schema", "required": true, "type": "integer", "description": "The wire schema version. Send 2. Version 2 adds session state and tracked-object records; version 1 events are still accepted." },
+    { "key": "$session_id", "required": false, "type": "string", "description": "One ID per game launch or editor Play run. Testing Floor shows each as one run." },
+    { "key": "$user_id", "required": false, "type": "string", "description": "A stable player ID your game assigns. Shown as the Player ID." },
+    { "key": "$device_id", "required": false, "type": "string", "description": "A stable ID for the installation. Used as the Player ID when $user_id is missing." },
+    { "key": "$tf", "required": false, "type": "object", "description": "Context the SDK or Testing Floor attaches. Its keys are listed under context fields." }
+  ],
+  "context_fields": [
+    { "key": "sdk_version", "type": "string", "set_by": "sdk", "description": "Version of the SDK that sent the event.", "analytics": { "label": "SDK version", "dimension": true } },
+    { "key": "app_version", "type": "string", "set_by": "sdk", "description": "The game's build version, from the engine's version setting. Map it as the game's app version in telemetry settings to group and filter by build.", "environment_field": "build_version" },
+    { "key": "engine", "type": "string", "set_by": "sdk", "description": "Engine name and version, such as Unity 6000.3.7f1.", "analytics": { "label": "Engine", "dimension": true }, "environment_field": "engine" },
+    { "key": "os", "type": "string", "set_by": "sdk", "description": "The platform the game runs on, as the engine names it.", "analytics": { "label": "OS", "dimension": true }, "environment_field": "platform" },
+    { "key": "device_model", "type": "string", "set_by": "sdk", "description": "The device or hardware model the engine reports.", "analytics": { "label": "Device", "dimension": true } },
+    { "key": "locale", "type": "string", "set_by": "sdk", "description": "The system language or culture the engine reports.", "analytics": { "label": "Locale", "dimension": true }, "environment_field": "system_language" },
+    { "key": "screen_width", "type": "integer", "set_by": "sdk", "description": "Width in pixels of the game's screen or viewport." },
+    { "key": "screen_height", "type": "integer", "set_by": "sdk", "description": "Height in pixels of the game's screen or viewport." },
+    { "key": "recording_uuid", "type": "string", "set_by": "sdk", "description": "The desktop app recording this event belongs to. Links telemetry to video." },
+    { "key": "playtest_id", "type": "integer", "set_by": "sdk", "description": "The playtest the desktop app launched the game for." },
+    { "key": "seq", "type": "integer", "set_by": "sdk", "description": "Starts at 1 for each run and increases by one for every record the SDK queues. Orders records that share a time and reveals dropped records." },
+    { "key": "keyframe", "type": "boolean", "set_by": "sdk", "description": "On a session-state or tracked-objects record, true when the record repeats every current value instead of only changes." },
+    { "key": "session_id", "type": "string", "set_by": "testing_floor", "description": "The desktop app's capture ID on events Testing Floor relays for the desktop app." },
+    { "key": "tester_id", "type": "integer", "set_by": "testing_floor", "description": "The Testing Floor tester on events Testing Floor relays for the desktop app." }
+  ],
+  "platform_records": [
+    { "id": "state", "name": "$tf_state", "sent_by": "sdk", "status": "current", "description": "Session state: values that stay true until they change, such as settings, input device or equipped item. Holds only changed keys unless $tf.keyframe is true; null removes a key. Analytics can keep runs whose state ever had a value." },
+    { "id": "objects", "name": "$tf_objects", "sent_by": "sdk", "status": "current", "description": "Positions, removals and state of tracked objects such as NPCs, vehicles and pickups, as the parallel arrays listed under tracked-object fields." },
+    { "id": "telemetry_complete", "name": "$tf_telemetry_complete", "sent_by": "sdk", "status": "current", "description": "Sent once per run when a recording closes, after earlier batches were acknowledged. dropped_events above zero means the recording's telemetry is incomplete.", "fields": [
+      { "key": "dropped_events", "type": "integer", "description": "Events the SDK dropped for this recording." },
+      { "key": "interrupted", "type": "boolean", "description": "True when the run ended before the SDK could deliver everything." }
+    ] },
+    { "id": "recording_started", "name": "$tf_recording_started", "sent_by": "desktop_app", "status": "current", "description": "The desktop app started recording." },
+    { "id": "recording_paused", "name": "$tf_recording_paused", "sent_by": "desktop_app", "status": "current", "description": "The desktop app paused recording." },
+    { "id": "recording_resumed", "name": "$tf_recording_resumed", "sent_by": "desktop_app", "status": "current", "description": "The desktop app resumed recording." },
+    { "id": "recording_ended", "name": "$tf_recording_ended", "sent_by": "desktop_app", "status": "current", "description": "The desktop app stopped recording." },
+    { "id": "session_start", "name": "$tf_session_start", "sent_by": "desktop_app", "status": "current", "role": "session_start", "description": "The desktop app launched the game without recording. Older SDKs also sent it at launch." },
+    { "id": "session_end", "name": "$tf_session_end", "sent_by": "sdk", "status": "legacy", "role": "session_end", "description": "Sent by SDKs before 0.2.0 when a run ended. Read in older data only." },
+    { "id": "legacy_session_start", "name": "tf_session_start", "sent_by": "sdk", "status": "legacy", "role": "session_start", "description": "Pre-release name for the run start marker. Read in older data only." },
+    { "id": "legacy_session_end", "name": "tf_session_end", "sent_by": "sdk", "status": "legacy", "role": "session_end", "description": "Pre-release name for the run end marker. Read in older data only." }
+  ],
+  "reserved": [
+    { "pattern": "$", "kind": "property_prefix", "rule": "disallowed", "description": "Property keys may not begin with $. The collector rejects events with $ fields it does not know, and SDKs drop such properties." },
+    { "pattern": "$tf_", "kind": "event_name_prefix", "rule": "platform_only", "description": "Event names beginning with $tf_ are platform records. Games must not send them." },
+    { "pattern": "tf.recording_uuid", "kind": "property", "rule": "legacy", "description": "Early SDKs sent the recording UUID as this property. It is still read; current SDKs use $tf.recording_uuid." },
+    { "pattern": "recording_id", "kind": "property", "rule": "platform_only", "description": "Testing Floor adds the recording's ID to desktop app events it relays." }
+  ],
+  "conventional_properties": [
+    { "key": "game_level.id", "type": "string", "set_by": "game", "status": "suggested", "description": "A stable, game-owned level or map identifier. Tracked-object records copy game_level.* values from the latest event, so maps and paths can split by level." },
+    { "key": "player.position.x", "type": "number", "set_by": "sdk", "status": "current", "unit": "engine units", "description": "Player position on every event when a position source is registered. Feeds the player-position heatmap and the run's path." },
+    { "key": "player.position.y", "type": "number", "set_by": "sdk", "status": "current", "unit": "engine units", "description": "Player position, vertical axis in Unity." },
+    { "key": "player.position.z", "type": "number", "set_by": "sdk", "status": "current", "unit": "engine units", "description": "Player position." },
+    { "key": "camera.position.x", "type": "number", "set_by": "sdk", "status": "current", "unit": "engine units", "description": "Camera position on every event when a camera source is registered." },
+    { "key": "camera.position.y", "type": "number", "set_by": "sdk", "status": "current", "unit": "engine units", "description": "Camera position." },
+    { "key": "camera.position.z", "type": "number", "set_by": "sdk", "status": "current", "unit": "engine units", "description": "Camera position." },
+    { "key": "camera.forward.x", "type": "number", "set_by": "sdk", "status": "current", "description": "Camera viewing direction, a unit vector. Use it rather than camera.euler, whose conventions differ between engines." },
+    { "key": "camera.forward.y", "type": "number", "set_by": "sdk", "status": "current", "description": "Camera viewing direction." },
+    { "key": "camera.forward.z", "type": "number", "set_by": "sdk", "status": "current", "description": "Camera viewing direction." },
+    { "key": "camera.euler.x", "type": "number", "set_by": "sdk", "status": "current", "unit": "degrees", "description": "Camera rotation in the engine's native Euler convention." },
+    { "key": "camera.euler.y", "type": "number", "set_by": "sdk", "status": "current", "unit": "degrees", "description": "Camera rotation." },
+    { "key": "camera.euler.z", "type": "number", "set_by": "sdk", "status": "current", "unit": "degrees", "description": "Camera rotation." },
+    { "key": "camera.fov", "type": "number", "set_by": "sdk", "status": "current", "unit": "degrees", "description": "Camera field of view." },
+    { "key": "camera.fov_axis", "type": "string", "set_by": "sdk", "status": "current", "description": "Session state: vertical in Unity, horizontal in Unreal." },
+    { "key": "viewport.width", "type": "integer", "set_by": "sdk", "status": "current", "unit": "pixels", "description": "Session state: width of the game view." },
+    { "key": "viewport.height", "type": "integer", "set_by": "sdk", "status": "current", "unit": "pixels", "description": "Session state: height of the game view." },
+    { "key": "movement.reason", "type": "string", "set_by": "sdk", "status": "current", "event": "player_moved", "description": "Why the SDK sampled movement: start, ping or stop." },
+    { "key": "movement.distance", "type": "number", "set_by": "sdk", "status": "current", "event": "player_moved", "unit": "meters", "description": "Distance moved since the previous ping, or over the whole run on stop." },
+    { "key": "movement.duration", "type": "number", "set_by": "sdk", "status": "current", "event": "player_moved", "unit": "seconds", "description": "Time covered by the movement sample." },
+    { "key": "movement.rotation_degrees", "type": "number", "set_by": "sdk", "status": "current", "event": "player_moved", "unit": "degrees", "description": "Camera rotation over the sample." },
+    { "key": "movement.fov_delta", "type": "number", "set_by": "sdk", "status": "current", "event": "player_moved", "unit": "degrees", "description": "Change in field of view over the sample." },
+    { "key": "movement.camera_distance", "type": "number", "set_by": "sdk", "status": "current", "event": "player_moved", "unit": "meters", "description": "Distance the camera moved over the sample." },
+    { "key": "teleport.kind", "type": "string", "set_by": "sdk", "status": "current", "event": "player_teleported", "description": "Always teleport." },
+    { "key": "teleport.reason", "type": "string", "set_by": "game", "status": "current", "event": "player_teleported", "description": "Optional reason the game gives for the teleport." },
+    { "key": "teleport.duration", "type": "number", "set_by": "sdk", "status": "current", "event": "player_teleported", "unit": "seconds", "description": "Time from start to end of the teleport." },
+    { "key": "teleport.distance", "type": "number", "set_by": "sdk", "status": "current", "event": "player_teleported", "unit": "meters", "description": "Straight-line distance between the endpoints." },
+    { "key": "teleport.start.position.x", "type": "number", "set_by": "sdk", "status": "current", "event": "player_teleported", "unit": "engine units", "description": "Where the teleport started. Paths break here instead of drawing a line across the map." },
+    { "key": "teleport.start.position.y", "type": "number", "set_by": "sdk", "status": "current", "event": "player_teleported", "unit": "engine units", "description": "Where the teleport started." },
+    { "key": "teleport.start.position.z", "type": "number", "set_by": "sdk", "status": "current", "event": "player_teleported", "unit": "engine units", "description": "Where the teleport started." },
+    { "key": "teleport.end.position.x", "type": "number", "set_by": "sdk", "status": "current", "event": "player_teleported", "unit": "engine units", "description": "Where the teleport ended." },
+    { "key": "teleport.end.position.y", "type": "number", "set_by": "sdk", "status": "current", "event": "player_teleported", "unit": "engine units", "description": "Where the teleport ended." },
+    { "key": "teleport.end.position.z", "type": "number", "set_by": "sdk", "status": "current", "event": "player_teleported", "unit": "engine units", "description": "Where the teleport ended." }
+  ],
+  "desktop_app_properties": [
+    { "key": "launch_mode", "type": "string", "events": ["$tf_recording_started", "$tf_session_start"], "description": "How the desktop app launched the game, such as steam, hosted_zip or manual." },
+    { "key": "play_mode", "type": "string", "events": ["$tf_session_start"], "description": "without_recording when the tester played without recording." },
+    { "key": "fps", "type": "integer", "events": ["$tf_recording_started"], "description": "Capture frame rate." },
+    { "key": "display_width", "type": "integer", "events": ["$tf_recording_started"], "unit": "pixels", "description": "Width of the captured display or window." },
+    { "key": "display_height", "type": "integer", "events": ["$tf_recording_started"], "unit": "pixels", "description": "Height of the captured display or window." },
+    { "key": "capture.mode", "type": "string", "events": ["$tf_recording_started"], "description": "What the desktop app captured, such as a window or a display." },
+    { "key": "capture.title_present", "type": "boolean", "events": ["$tf_recording_started"], "description": "Whether the captured window had a title." },
+    { "key": "capture.source_size.width", "type": "integer", "events": ["$tf_recording_started"], "unit": "pixels", "description": "Width of the capture source." },
+    { "key": "capture.source_size.height", "type": "integer", "events": ["$tf_recording_started"], "unit": "pixels", "description": "Height of the capture source." },
+    { "key": "game_build_id", "type": "string", "events": ["$tf_recording_started"], "description": "The build the desktop app installed for the playtest." },
+    { "key": "custom_launch_options_present", "type": "boolean", "events": ["$tf_recording_started"], "description": "Whether the tester added custom launch options." },
+    { "key": "video_time_ms", "type": "integer", "events": ["$tf_recording_paused", "$tf_recording_resumed"], "unit": "milliseconds", "description": "Position in the video when recording paused or resumed." },
+    { "key": "duration_ms", "type": "integer", "events": ["$tf_recording_ended"], "unit": "milliseconds", "description": "Length of the recording." },
+    { "key": "stop_reason", "type": "string", "events": ["$tf_recording_ended"], "description": "Why recording stopped." },
+    { "key": "capture_interrupted", "type": "boolean", "events": ["$tf_recording_ended"], "description": "True when capture stopped unexpectedly." },
+    { "key": "capture_interrupted_source", "type": "string", "events": ["$tf_recording_ended"], "description": "Which capture stopped unexpectedly, such as screen or audio." },
+    { "key": "recording_id", "type": "integer", "events": ["$tf_recording_started", "$tf_recording_paused", "$tf_recording_resumed", "$tf_recording_ended", "$tf_session_start"], "description": "Added by Testing Floor when the recording already exists." }
+  ],
+  "sdk_events": [
+    { "name": "player_moved", "description": "Optional, off by default. Debounced movement samples with player and camera pose; the main input for player-position heatmaps and paths." },
+    { "name": "player_teleported", "description": "Sent by the SDK's teleport helpers so paths break at the jump." }
+  ],
+  "tracked_object_fields": [
+    { "key": "sample.id", "type": "string[]", "description": "Object IDs, one per sample. The game's ID, or kind#n when the game gives none." },
+    { "key": "sample.kind", "type": "string[]", "description": "Object kinds, such as npc, boat or pickup. Analytics offers one heatmap source per kind." },
+    { "key": "sample.x", "type": "number[]", "unit": "engine units", "description": "Object positions, rounded to 1 cm." },
+    { "key": "sample.y", "type": "number[]", "unit": "engine units", "description": "Object positions." },
+    { "key": "sample.z", "type": "number[]", "unit": "engine units", "description": "Object positions." },
+    { "key": "removed.id", "type": "string[]", "description": "Objects removed in this record. Each removal carries its final position as a sample." },
+    { "key": "removed.reason", "type": "string[]", "description": "Why each object was removed: destroyed, gone, disabled, or a reason the game gives." },
+    { "key": "state.id", "type": "string[]", "description": "Objects whose state changed, one per state entry." },
+    { "key": "state.key", "type": "string[]", "description": "The state key for each entry. The key label names the object on maps." },
+    { "key": "state.value", "type": "scalar[]", "description": "The new value for each entry: a string, number or boolean." }
+  ],
+  "derived_fields": [
+    { "key": "object.id", "type": "string", "description": "In analytics, the tracked object a position belongs to. Testing Floor derives it from sample.id; do not send it." },
+    { "key": "object.kind", "type": "string", "description": "In analytics, the tracked object's kind." },
+    { "key": "object.position.x", "type": "number", "description": "In analytics, a tracked object's position." },
+    { "key": "object.position.y", "type": "number", "description": "In analytics, a tracked object's position." },
+    { "key": "object.position.z", "type": "number", "description": "In analytics, a tracked object's position." },
+    { "key": "object.duration_seconds", "type": "number", "description": "In analytics, the estimated seconds an object stayed at a position: until its next update or removal, bounded by the run and the selected time range." }
+  ]
+}

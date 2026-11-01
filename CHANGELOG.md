@@ -6,6 +6,7 @@
 - Attach to already-running Play, suspend on expired recording leases, renew with fresh state/object keyframes, and record again without restarting Play.
 - Preserve Play identity and immutable event association while isolating recording completion/drop counts.
 - Acknowledge SDK participation through local status and preserve interruption evidence in completion markers.
+- Ship an unedited copy of the Testing Floor telemetry contract in `Tests/Contract`. `TestingFloor.Sdk.Contract` automation tests fail when the envelope, `$tf` keys, record names, tracked-object fields, SDK properties or limits differ from it.
 
 ## 0.4.0 — Unreleased
 

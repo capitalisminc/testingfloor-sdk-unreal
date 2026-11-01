@@ -64,6 +64,18 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Vendored source differs"):
             check_release.validate(self.root)
 
+    def test_unlisted_contract_rejected(self):
+        manifest = self.root / check_release.MANIFEST
+        entries = manifest.read_text().splitlines()
+        manifest.write_text("\n".join(entry for entry in entries if entry != check_release.CONTRACT) + "\n")
+        with self.assertRaisesRegex(ValueError, "omits the telemetry contract"):
+            check_release.validate(self.root)
+
+    def test_malformed_contract_rejected(self):
+        (self.root / check_release.CONTRACT).write_text("{")
+        with self.assertRaisesRegex(ValueError, "Telemetry contract is not valid JSON"):
+            check_release.validate(self.root)
+
     def test_missing_license_rejected(self):
         (self.root / "LICENSE.md").unlink()
         with self.assertRaisesRegex(ValueError, "Missing or symlinked release file"):

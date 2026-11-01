@@ -24,6 +24,7 @@ namespace Private
 {
 constexpr int32 EventByteCap = 32 << 10;
 constexpr int32 BodyByteCap = (1 << 20) - (8 << 10);
+constexpr int32 MaxBatchEvents = 2000;
 constexpr double StatePollSeconds = 1.0;
 constexpr double KeyframeSeconds = 300.0;
 constexpr double ObjectMinMoveCentimeters = 25.0;
@@ -34,6 +35,7 @@ constexpr int32 CoordinateBytes = 12;
 constexpr int32 NumberBytes = 25;
 const TCHAR* const StateRecordName = TEXT("$tf_state");
 const TCHAR* const ObjectsRecordName = TEXT("$tf_objects");
+const TCHAR* const CompletionRecordName = TEXT("$tf_telemetry_complete");
 
 FString Encode(const TSharedRef<FJsonObject>& Object)
 {
@@ -541,9 +543,9 @@ FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FD
 	for (const FEvent& Event : Events)
 	{
 		// A completion marker is its own request, after preceding requests succeed.
-		if ((Event.Name == TEXT("$tf_telemetry_complete") && OutConsumed > 0)
-			|| (OutConsumed > 0 && Events[0].Name == TEXT("$tf_telemetry_complete"))) break;
-		if (Written >= FMath::Clamp(Settings.BatchMaxEvents, 1, 2000))
+		if ((Event.Name == Private::CompletionRecordName && OutConsumed > 0)
+			|| (OutConsumed > 0 && Events[0].Name == Private::CompletionRecordName)) break;
+		if (Written >= FMath::Clamp(Settings.BatchMaxEvents, 1, Private::MaxBatchEvents))
 		{
 			break;
 		}
@@ -551,7 +553,7 @@ FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FD
 		const int32 EventBytes = Private::Utf8Length(EventJson);
 		if (EventBytes > Private::EventByteCap)
 		{
-			if (Event.Recording.IsSet() && Event.Name != TEXT("$tf_telemetry_complete")) ++RecordingDropped;
+			if (Event.Recording.IsSet() && Event.Name != Private::CompletionRecordName) ++RecordingDropped;
 			++OutConsumed;
 			continue;
 		}
@@ -836,7 +838,7 @@ void FClient::CountDroppedRecords(TConstArrayView<FEvent> Records)
 	NoteDropped(Records.Num());
 	for (const FEvent& Record : Records)
 	{
-		if (Record.Recording.IsSet() && Record.Name != TEXT("$tf_telemetry_complete"))
+		if (Record.Recording.IsSet() && Record.Name != Private::CompletionRecordName)
 		{
 			++RecordingDrops.FindOrAdd(Record.Recording->RecordingUUID);
 		}
@@ -1216,7 +1218,7 @@ void FClient::FinishRecording(const TCHAR* Reason)
 	CompletedRecordings.Add(Settings.Recording->RecordingUUID);
 	WriteRecordingStatus(Settings.Recording.GetValue(), TEXT("closed"), Reason);
 	if (!bRecordingRegistered) return;
-	FEvent Marker{ FGuid::NewGuid(), TEXT("$tf_telemetry_complete"), Clock(), SessionID, {} };
+	FEvent Marker{ FGuid::NewGuid(), Private::CompletionRecordName, Clock(), SessionID, {} };
 	Marker.Recording = Settings.Recording;
 	Marker.Properties.Set(TEXT("interrupted"), bRecordingInterrupted);
 	Marker.Sequence = NextSequence++;
@@ -1233,7 +1235,7 @@ void FClient::Flush()
 		return;
 	}
 	int32 Consumed = 0;
-	if (Queue[0].Name == TEXT("$tf_telemetry_complete"))
+	if (Queue[0].Name == Private::CompletionRecordName)
 	{
 		Queue[0].Properties.Set(TEXT("dropped_events"), RecordingDrops.FindRef(Queue[0].Recording->RecordingUUID));
 	}

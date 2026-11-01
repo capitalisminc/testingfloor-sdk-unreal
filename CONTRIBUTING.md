@@ -41,6 +41,18 @@ Before publishing a version, build the runtime target and Editor target and run
 the automation filter on every platform and engine version you claim to support.
 Verify any game-specific lifecycle and overlay integration in its host project.
 
+## Telemetry contract
+
+`Tests/Contract/telemetry_contract.json` is an unedited copy of the Testing Floor
+telemetry contract, the reference for wire field names, types and limits. The
+`TestingFloor.Sdk.Contract` tests compare what the client sends with it: the
+request and event envelope, `$tf` keys, platform record names, tracked-object
+fields, the SDK's own properties and events, value types and limits. Never edit
+the copy to make a test pass. Fix the SDK, or have the contract changed and
+replace the copy byte for byte. See [Tests/Contract/README.md](Tests/Contract/README.md).
+The copy ships with the plugin so that the tests can run in a host project;
+`Config/FilterPlugin.ini` keeps it in `BuildPlugin` packages.
+
 ## Package
 
 Create a source ZIP without repository history, local configuration, generated
@@ -51,8 +63,9 @@ python3 scripts/package.py --output dist/TestingFloor-0.4.0.zip
 ```
 
 The archive contains a `TestingFloor/` directory ready to copy into a project's
-`Plugins/` directory. It includes the plugin, SDK tests, README, changelog, and
-licenses. It does not include these contributor tools or Git metadata.
+`Plugins/` directory. It includes the plugin, SDK tests and the telemetry contract
+they read, README, changelog, and licenses. It does not include these contributor
+tools or Git metadata.
 
 For a platform-specific binary package, use your installed engine's `RunUAT`
 `BuildPlugin` command with `-Plugin=/path/to/TestingFloor.uplugin`, an output

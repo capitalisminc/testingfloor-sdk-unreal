@@ -3,6 +3,16 @@
 Unity and Unreal share this behavior. Their APIs follow each engine's conventions.
 For setup and code examples, start with the README in the SDK you use.
 
+## Field reference
+
+The Testing Floor telemetry contract, `telemetry_contract.json`, is the reference
+for wire names and limits: the request and event envelope, `$tf` context keys,
+platform record names, reserved names, value types, SDK properties and events,
+tracked-object fields and limits. Each SDK keeps an unedited copy with its tests.
+Those tests fail when the SDK and the copy disagree. This document describes
+behavior. If it and the contract give a different field name, type or limit, the
+contract is authoritative.
+
 ## Identity and recording
 
 - One SDK play-session ID per game launch or editor Play run. It changes for the next Play run.
