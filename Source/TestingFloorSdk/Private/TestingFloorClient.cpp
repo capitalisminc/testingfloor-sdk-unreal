@@ -384,17 +384,15 @@ bool FRecordingContext::HasActiveLease(FDateTime Now) const
 
 TOptional<FRecordingContext> FRecordingContext::Discover(FDateTime Now)
 {
+	// Interactive editors compare editor_pid; standalone child Play is project-scoped.
+	static const int64 CurrentProcessID = FPlatformProcess::GetCurrentProcessId();
 	FString Sidecar;
 	TArray<FString> Payloads;
 	if (FFileHelper::LoadFileToString(Sidecar, *(FPaths::ProjectSavedDir() / TEXT("TestingFloor/recording-payload.json"))))
 	{
-		const auto Target = Parse(Sidecar, Now);
-		if (!GIsEditor || !Target.IsSet() || Target->EditorProcessID == 0 || Target->EditorProcessID == FPlatformProcess::GetCurrentProcessId())
-		{
-			Payloads.Add(MoveTemp(Sidecar));
-		}
+		Payloads.Add(MoveTemp(Sidecar));
 	}
-	return Resolve(FCommandLine::Get(), Payloads, Now);
+	return Resolve(FCommandLine::Get(), Payloads, Now, GIsEditor ? CurrentProcessID : 0);
 }
 
 TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDateTime Now)
@@ -494,24 +492,29 @@ TOptional<FRecordingContext> FRecordingContext::FromCommandLine(const FString& C
 	return {};
 }
 
-TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now)
+TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now, int64 EditorProcessID)
 {
+	// A handoff that names another editor belongs to that editor, whichever source carries it, and
+	// cannot hide this editor's own handoff.
+	const auto ForThisEditor = [EditorProcessID](const TOptional<FRecordingContext>& Recording) {
+		return Recording.IsSet() && (EditorProcessID == 0 || Recording->EditorProcessID == 0 || Recording->EditorProcessID == EditorProcessID);
+	};
 	// A live editor owner supersedes a launch argument for the lifetime of this Play run.
 	// Retain expired leases too: they suspend the association instead of reviving an old CLI value.
 	for (const FString& Json : SidecarPayloads)
 	{
-		if (const auto Recording = Parse(Json, Now); Recording.IsSet() && Recording->LeaseVersion != 0)
+		if (const auto Recording = Parse(Json, Now); ForThisEditor(Recording) && Recording->LeaseVersion != 0)
 		{
 			return Recording;
 		}
 	}
-	if (const auto Recording = FromCommandLine(CommandLine, Now); Recording.IsSet())
+	if (const auto Recording = FromCommandLine(CommandLine, Now); ForThisEditor(Recording))
 	{
 		return Recording;
 	}
 	for (const FString& Json : SidecarPayloads)
 	{
-		if (const auto Recording = Parse(Json, Now); Recording.IsSet())
+		if (const auto Recording = Parse(Json, Now); ForThisEditor(Recording))
 		{
 			return Recording;
 		}

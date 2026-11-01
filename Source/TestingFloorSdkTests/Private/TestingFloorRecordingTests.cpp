@@ -2,6 +2,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -872,6 +873,53 @@ bool FTestingFloorCollectionReasonTest::RunTest(const FString& Parameters)
 	Rejected->Flush();
 	TestFalse(TEXT("A refused key stops collection"), Rejected->IsCollecting());
 	TestEqual(TEXT("Refused key"), Rejected->GetCollectionReason(), FString(TEXT("collector_rejected")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorEditorProcessScopeTest, "TestingFloor.Sdk.RecordingEditorProcessScope", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorEditorProcessScopeTest::RunTest(const FString& Parameters)
+{
+	const FDateTime Now(2026, 1, 1);
+	const int64 Expires = Now.ToUnixTimestamp() * 1000 + 5000;
+	const auto Lease = [Expires](const TCHAR* ID, int64 EditorPID) {
+		return FString::Printf(TEXT(R"TF({"recording_uuid":"%s","editor_pid":%lld,"lease_version":1,"telemetry_requested":true,"lease_expires_at_unix_ms":%lld})TF"), ID, EditorPID, Expires);
+	};
+	const auto Legacy = [](const TCHAR* ID, int64 EditorPID) {
+		return FString::Printf(TEXT(R"TF({"recording_uuid":"%s","editor_pid":%lld})TF"), ID, EditorPID);
+	};
+	const auto Argument = [](const TCHAR* ID, int64 EditorPID) {
+		return FString::Printf(TEXT(R"TF(--testing-floor={"recording_uuid":"%s","editor_pid":%lld})TF"), ID, EditorPID);
+	};
+	const auto Resolved = [Now](const FString& CommandLine, const TArray<FString>& Sidecars, int64 EditorPID) {
+		const auto Recording = TestingFloor::FRecordingContext::Resolve(CommandLine, Sidecars, Now, EditorPID);
+		return Recording.IsSet() ? Recording->RecordingUUID : FString(TEXT("none"));
+	};
+	constexpr int64 This = 222;
+	constexpr int64 Other = 111;
+	TestEqual(TEXT("Another editor's argument does not hide this editor's handoff file"),
+		Resolved(Argument(TEXT("other-argument"), Other), { Legacy(TEXT("own-file"), This) }, This), FString(TEXT("own-file")));
+	TestEqual(TEXT("Another editor's lease does not supersede this editor's argument"),
+		Resolved(Argument(TEXT("own-argument"), This), { Lease(TEXT("other-lease"), Other), Legacy(TEXT("own-file"), This) }, This), FString(TEXT("own-argument")));
+	TestEqual(TEXT("This editor's lease still supersedes its argument"),
+		Resolved(Argument(TEXT("own-argument"), This), { Lease(TEXT("own-lease"), This) }, This), FString(TEXT("own-lease")));
+	TestEqual(TEXT("Handoffs only for other editors are ignored"),
+		Resolved(Argument(TEXT("other-argument"), Other), { Lease(TEXT("other-lease"), Other) }, This), FString(TEXT("none")));
+	TestEqual(TEXT("A handoff without editor_pid applies to any editor"),
+		Resolved(Argument(TEXT("other-argument"), Other), { TEXT(R"TF({"recording_uuid":"unscoped"})TF") }, This), FString(TEXT("unscoped")));
+	TestEqual(TEXT("Without an editor process, handoffs are project-scoped"),
+		Resolved(Argument(TEXT("other-argument"), Other), { Legacy(TEXT("own-file"), This) }, 0), FString(TEXT("other-argument")));
+
+	if (GIsEditor)
+	{
+		// Discover scopes the project's handoff file to this editor's process.
+		TestingFloorRecordingTests::FScopedProjectHandoff Payload;
+		const int64 Current = FPlatformProcess::GetCurrentProcessId();
+		TF_REQUIRE_TRUE(Payload.Write(Lease(TEXT("other-editor"), Current + 1)), "Own a temporary project handoff");
+		TestFalse(TEXT("Discovery ignores another editor's handoff file"), TestingFloor::FRecordingContext::Discover(Now).IsSet());
+		TF_REQUIRE_TRUE(Payload.Write(Lease(TEXT("this-editor"), Current)), "Rewrite the handoff for this editor");
+		const auto Discovered = TestingFloor::FRecordingContext::Discover(Now);
+		TestTrue(TEXT("Discovery accepts this editor's handoff file"), Discovered.IsSet() && Discovered->RecordingUUID == TEXT("this-editor"));
+	}
 	return true;
 }
 

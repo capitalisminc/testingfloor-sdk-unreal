@@ -57,8 +57,11 @@ struct TESTINGFLOORSDK_API FRecordingContext
 	static TOptional<FRecordingContext> Parse(const FString& Json, FDateTime Now);
 	/** Handles raw argv flattened by Unreal, shell quoting and Windows escaped JSON. */
 	static TOptional<FRecordingContext> FromCommandLine(const FString& CommandLine, FDateTime Now);
-	/** Host supplies sidecar contents in priority order and retains ownership of their lifetime. */
-	static TOptional<FRecordingContext> Resolve(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now);
+	/**
+	 * Host supplies sidecar contents in priority order and retains ownership of their lifetime. With a nonzero
+	 * EditorProcessID, a handoff whose `editor_pid` names another editor is ignored, from either source.
+	 */
+	static TOptional<FRecordingContext> Resolve(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now, int64 EditorProcessID = 0);
 };
 
 struct FSettings

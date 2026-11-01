@@ -19,6 +19,7 @@
 - Track actors and scene components weakly with new `TrackObject` overloads, removing them as `destroyed` once they are gone. Add `UTestingFloorTrackedObjectComponent`, which tracks its owner with no code and removes it as `disabled` or `destroyed`. The default factory makes its client the default for these components; `FClient::SetDefault` sets another.
 - Give each object check a `$time` later than the previous check's.
 - Add `OnRecordingChanged()`, broadcast before the new recording's keyframes, and `IsCollecting()` / `GetCollectionReason()`.
+- In the editor, ignore a launch argument whose `editor_pid` names another editor, as handoff files already were. Such an argument could attach this editor's telemetry to another editor's recording. `FRecordingContext::Resolve` takes the editor process ID to check both sources.
 - `SDK_CONTRACT.md` matches the Unity SDK's copy again, and the vendored telemetry contract declares `$tf.editor`.
 
 ## 0.4.0 — Unreleased
