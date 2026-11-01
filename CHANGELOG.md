@@ -1,13 +1,18 @@
 # Changelog
 
-## 0.5.0 — Unreleased
+## 0.6.0 — 2026-11-01
+
+The first tagged release. It also contains the changes listed under 0.5.0, 0.4.0, 0.3.0 and 0.2.0, which were never tagged.
+
+- Send orthographic cameras. `FActivitySample::CameraOrthoWidth` sends `camera.ortho_width` instead of `camera.fov`, and the session state `camera.projection` says `orthographic` or `perspective`. `CameraFocus` sends `camera.focus`, the point at the center of the view, such as a strategy camera's pivot, and a camera rotation also sends `camera.up`. A change of orthographic width is movement, reported as `movement.ortho_width_delta` and tuned by `FMovementSettings::MinPingOrthoWidth` and `MinStepOrthoWidth`; changes to an unused `CameraFOV` are not. Before, an orthographic camera could only report a field of view it doesn't use.
+
+## 0.5.0 — untagged
 
 - Enable editor telemetry only while a live desktop recording is attached, with a separate opt-out and all existing master/configuration/automation gates.
 - Attach to already-running Play, suspend on expired recording leases, renew with fresh state/object keyframes, and record again without restarting Play.
 - Preserve Play identity and immutable event association while isolating recording completion/drop counts.
 - Refuse `Track` event names that begin with `$tf_` in any casing, which the telemetry contract reserves for Testing Floor records, with one warning per name. Refusals count in `GetDroppedEventCount` while collecting, but not toward a recording's `dropped_events`. Before, a game event named `$tf_telemetry_complete` was batched as a completion marker and, without a recording, failed a check on flush.
 - Acknowledge SDK participation through local status and preserve interruption evidence in completion markers.
-- Send orthographic cameras. `FActivitySample::CameraOrthoWidth` sends `camera.ortho_width` instead of `camera.fov`, and the session state `camera.projection` says `orthographic` or `perspective`. `CameraFocus` sends `camera.focus`, the point at the center of the view, such as a strategy camera's pivot, and a camera rotation also sends `camera.up`. A change of orthographic width is movement, reported as `movement.ortho_width_delta` and tuned by `FMovementSettings::MinPingOrthoWidth` and `MinStepOrthoWidth`. Before, an orthographic camera could only report a field of view it doesn't use.
 - Attach a recording when the Play run cannot create its registration file in the recording's telemetry directory, as in a sandboxed macOS game. Events still carry the recording, closure still sends the completion marker, and a warning is logged. Before, the SDK refused the recording, so none of the run's telemetry was linked to it.
 - Ship an unedited copy of the Testing Floor telemetry contract in `Tests/Contract`. `TestingFloor.Sdk.Contract` automation tests fail when the envelope, `$tf` keys, record names, tracked-object fields, SDK properties or limits differ from it.
 
@@ -24,7 +29,7 @@
 - In the editor, ignore a launch argument whose `editor_pid` names another editor, as handoff files already were. Such an argument could attach this editor's telemetry to another editor's recording. `FRecordingContext::Resolve` takes the editor process ID to check both sources.
 - `SDK_CONTRACT.md` matches the Unity SDK's copy again, and the vendored telemetry contract declares `$tf.editor`.
 
-## 0.4.0 — Unreleased
+## 0.4.0 — untagged
 
 Telemetry schema 2: values that rarely change are sent once, and world objects get paths.
 
@@ -40,12 +45,12 @@ Telemetry schema 2: values that rarely change are sent once, and world objects g
 - `TrackObject`, `SetObjectState` and `RemoveObject` for NPCs, props and projectiles. The SDK checks live objects 4 times a second (`FSettings::ObjectChecksPerSecond`, 1–10) and batches positions, state and removals into `$tf_objects` records. `FSettings::MaxTrackedObjects` (default 256) limits live objects.
 - Recording delivery completion covers the new records: `$tf_telemetry_complete` takes the next `$tf.seq`, dropped `$tf_state` and `$tf_objects` records count toward `dropped_events`, state and object records stop carrying a closed recording's UUID, and registering with a recording starts state and object keyframes.
 
-## 0.3.0
+## 0.3.0 — untagged
 
 - Register each Play run with its recorder and close recording telemetry with an acknowledged flush marker.
 - Keep completion markers behind earlier batch acknowledgments, report dropped events, and detach later gameplay from stopped recordings.
 
-## 0.2.0 — Unreleased
+## 0.2.0 — untagged
 
 ### Changed (breaking)
 
