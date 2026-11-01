@@ -158,7 +158,9 @@ FVector4d ActivityStep(const FActivitySample& Current, const FActivitySample& Pr
 	const double Rotation = Current.CameraRotation.IsSet() && Previous.CameraRotation.IsSet()
 		? FMath::RadiansToDegrees(Current.CameraRotation.GetValue().AngularDistance(Previous.CameraRotation.GetValue()))
 		: 0.0;
-	const double FOV = Current.CameraFOV.IsSet() && Previous.CameraFOV.IsSet()
+	// An orthographic camera ignores its field of view, as serialization does.
+	const bool bOrthographic = Current.CameraOrthoWidth.IsSet() || Previous.CameraOrthoWidth.IsSet();
+	const double FOV = !bOrthographic && Current.CameraFOV.IsSet() && Previous.CameraFOV.IsSet()
 		? FMath::Abs(Current.CameraFOV.GetValue() - Previous.CameraFOV.GetValue())
 		: 0.0;
 	return FVector4d(

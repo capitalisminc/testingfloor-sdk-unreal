@@ -311,16 +311,32 @@ bool FTestingFloorOrthographicZoomTest::RunTest(const FString& Parameters)
 	TestingFloor::FActivitySample Sample;
 	Sample.CameraRotation = FRotator(-90.0, 0.0, 0.0).Quaternion();
 	Sample.CameraOrthoWidth = 2000.0;
+	Sample.CameraFOV = 90.0;
 	Client->SetActivitySource([&Sample] { return Sample; });
 	Client->Tick(0.0);
-	// Only the view width changes: 1 m, 1 m, then 2 m.
+	// Only the view width changes: 1 m, 1 m, then 2 m. The unused FOV drifts too.
 	Sample.CameraOrthoWidth = 2100.0;
+	Sample.CameraFOV = 95.0;
 	Client->Tick(0.1);
 	Sample.CameraOrthoWidth = 2200.0;
+	Sample.CameraFOV = 100.0;
 	Client->Tick(0.2);
 	Sample.CameraOrthoWidth = 2400.0;
 	Client->Tick(0.8);
 	Client->Tick(1.1);
+	const auto Idle = TestingFloor::FClient::Create(Settings, {}, MakeShared<TestingFloorClientTests::FTransport>());
+	TestingFloor::FActivitySample Still;
+	Still.CameraOrthoWidth = 2000.0;
+	Still.CameraFOV = 90.0;
+	Idle->SetActivitySource([&Still] { return Still; });
+	Idle->Tick(0.0);
+	for (const double Now : { 0.1, 0.2, 0.8, 1.1 })
+	{
+		Still.CameraFOV = Still.CameraFOV.GetValue() + 5.0;
+		Idle->Tick(Now);
+	}
+	TestEqual(TEXT("An orthographic camera's unused FOV is not movement"),
+		Idle->GetQueuedEvents().FilterByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("player_moved"); }).Num(), 0);
 	const auto Moves = Client->GetQueuedEvents().FilterByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("player_moved"); });
 	TF_REQUIRE_TRUE(Moves.Num() == 3, "Zooming alone produces start, ping, stop");
 	const auto Delta = [](const TestingFloor::FEvent& Event)
