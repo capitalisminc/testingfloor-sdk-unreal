@@ -932,4 +932,29 @@ bool FTestingFloorCloseRefusedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorObjectCheckTimeTest, "TestingFloor.Sdk.Schema2.ObjectChecksAreTimeOrdered", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorObjectCheckTimeTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorSchemaTests;
+	FDateTime Now(2026, 1, 1, 12, 0, 0);
+	const auto Client = TestingFloor::FClient::Create(Settings(), {}, MakeShared<FTransport>(), [&Now] { return Now; });
+	FVector Crate = FVector::ZeroVector;
+	Client->TrackObject(TEXT("crate"), [&Crate] { return TOptional<FVector>(Crate); }, TEXT("crate"));
+	Client->Tick(0.0);
+	Crate.X = 100.0;
+	Client->Tick(0.25);
+	Crate.X = 200.0;
+	Client->Tick(0.5);
+	Now += FTimespan::FromSeconds(1);
+	Crate.X = 300.0;
+	Client->Tick(0.75);
+	const auto Objects = Records(*Client, TEXT("$tf_objects"));
+	TF_REQUIRE_TRUE(Objects.Num() == 4, "One record per check");
+	TestEqual(TEXT("The first check takes the clock's time"), Objects[0]->GetStringField(TEXT("$time")), FString(TEXT("2026-01-01T12:00:00.000Z")));
+	TestEqual(TEXT("A check in the same millisecond is one millisecond later"), Objects[1]->GetStringField(TEXT("$time")), FString(TEXT("2026-01-01T12:00:00.001Z")));
+	TestEqual(TEXT("And the next one later again"), Objects[2]->GetStringField(TEXT("$time")), FString(TEXT("2026-01-01T12:00:00.002Z")));
+	TestEqual(TEXT("A clock that moved on is used as it is"), Objects[3]->GetStringField(TEXT("$time")), FString(TEXT("2026-01-01T12:00:01.000Z")));
+	return true;
+}
+
 #endif

@@ -34,8 +34,11 @@ UnrealEditor-Cmd /path/to/MyGame.uproject \
 ```
 
 Tests exercise typed payloads, collection gates, retry identity/order, queue and
-body caps, movement, teleports, recorder parsing, QR reference matrices, pixels,
+body caps, movement, teleports, recorder parsing, engine context and persisted
+IDs, actor and component tracking in a test world, QR reference matrices, pixels,
 capacity, and timing. All transports are mocks; no write key or network is needed.
+The ID tests write to a temporary save slot and a temporary folder in the host
+project's `Saved` directory, and delete both.
 
 Before publishing a version, build the runtime target and Editor target and run
 the automation filter on every platform and engine version you claim to support.

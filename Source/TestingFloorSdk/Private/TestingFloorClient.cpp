@@ -1,6 +1,12 @@
 #include "TestingFloor/TestingFloorClient.h"
 
+#include "TestingFloor/TestingFloorTrackedObjectComponent.h"
+#include "Components/SceneComponent.h"
 #include "Dom/JsonObject.h"
+#include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
+#include "GameFramework/Actor.h"
+#include "GeneralProjectSettings.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
@@ -11,7 +17,10 @@
 #include "Misc/EngineVersion.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
+#include "PlatformFeatures.h"
 #include "Policies/CondensedJsonPrintPolicy.h"
+#include "SaveGameSystem.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
@@ -203,6 +212,54 @@ int32 EstimateBytes(const FString& ID, const FString& Kind, int32 Samples, const
 		Bytes += JsonStringBytes(ID) + JsonStringBytes(Pair.Key) + (bString ? JsonStringBytes(Pair.Value->AsString()) : NumberBytes) + 2;
 	}
 	return Bytes + (Reason.IsEmpty() ? 0 : JsonStringBytes(ID) + JsonStringBytes(Reason) + 1);
+}
+
+/** A stored ID that is safe to send: short, with no whitespace or control characters. */
+bool IsUsableID(const FString& Value)
+{
+	if (Value.IsEmpty() || Value.Len() > 128)
+	{
+		return false;
+	}
+	for (const TCHAR Character : Value)
+	{
+		if (FChar::IsWhitespace(Character) || Character < TEXT(' '))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+FString NewID()
+{
+	return FGuid::NewGuid().ToString(EGuidFormats::Digits).ToLower();
+}
+
+/** The client UTestingFloorTrackedObjectComponent registers with. Game thread only. */
+TWeakPtr<FClient>& DefaultClient()
+{
+	static TWeakPtr<FClient> Client;
+	return Client;
+}
+
+FIntPoint EngineViewportSize()
+{
+	FVector2D Size = FVector2D::ZeroVector;
+	if (GEngine && GEngine->GameViewport)
+	{
+		GEngine->GameViewport->GetViewportSize(Size);
+	}
+	return FIntPoint(FMath::RoundToInt(Size.X), FMath::RoundToInt(Size.Y));
+}
+
+void SetIfPresent(FJsonObject& Object, const TCHAR* Key, const FString& Value)
+{
+	const FString Trimmed = Value.TrimStartAndEnd();
+	if (!Trimmed.IsEmpty())
+	{
+		Object.SetStringField(Key, Trimmed);
+	}
 }
 } // namespace Private
 
@@ -482,14 +539,8 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 	Object->SetStringField(TEXT("$time"), Event.Timestamp.ToIso8601());
 	Object->SetNumberField(TEXT("$schema"), 2);
 	Object->SetStringField(TEXT("$session_id"), Event.SessionID);
-	if (!Settings.DeviceID.IsEmpty())
-	{
-		Object->SetStringField(TEXT("$device_id"), Settings.DeviceID);
-	}
-	if (!Settings.UserID.IsEmpty())
-	{
-		Object->SetStringField(TEXT("$user_id"), Settings.UserID);
-	}
+	Private::SetIfPresent(*Object, TEXT("$device_id"), Settings.DeviceID);
+	Private::SetIfPresent(*Object, TEXT("$user_id"), Settings.UserID);
 	const TSharedRef<FJsonObject> Platform = MakeShared<FJsonObject>();
 	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.5.0"));
 	if (Event.Sequence > 0)
@@ -500,14 +551,16 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 	{
 		Platform->SetBoolField(TEXT("keyframe"), true);
 	}
-	Platform->SetStringField(TEXT("engine"), TEXT("Unreal ") + Settings.EngineVersion);
-	Platform->SetStringField(TEXT("app_version"), Settings.AppVersion);
-	Platform->SetStringField(TEXT("os"), Settings.OperatingSystem);
-	Platform->SetStringField(TEXT("locale"), Settings.Locale);
-	if (!Settings.DeviceModel.IsEmpty())
+	// Unknown context is left out rather than sent empty or half filled.
+	if (!Settings.EngineVersion.TrimStartAndEnd().IsEmpty())
 	{
-		Platform->SetStringField(TEXT("device_model"), Settings.DeviceModel);
+		Platform->SetStringField(TEXT("engine"), TEXT("Unreal ") + Settings.EngineVersion.TrimStartAndEnd());
 	}
+	Private::SetIfPresent(*Platform, TEXT("app_version"), Settings.AppVersion);
+	Private::SetIfPresent(*Platform, TEXT("os"), Settings.OperatingSystem);
+	Private::SetIfPresent(*Platform, TEXT("locale"), Settings.Locale);
+	Private::SetIfPresent(*Platform, TEXT("device_model"), Settings.DeviceModel);
+	Platform->SetBoolField(TEXT("editor"), Event.bEditor);
 	const FIntPoint ScreenSize = Event.ScreenSize.X > 0 && Event.ScreenSize.Y > 0 ? Event.ScreenSize : Settings.ScreenSize;
 	if (ScreenSize.X > 0)
 	{
@@ -576,6 +629,158 @@ FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FD
 	return Written > 0 ? Body : FString();
 }
 
+void ApplyEngineDefaults(FSettings& Settings)
+{
+	if (Settings.EngineVersion.IsEmpty()) Settings.EngineVersion = FEngineVersion::Current().ToString();
+	if (Settings.OperatingSystem.IsEmpty()) Settings.OperatingSystem = OperatingSystemFamily(ANSI_TO_TCHAR(FPlatformProperties::IniPlatformName()));
+	if (Settings.Locale.IsEmpty()) Settings.Locale = LanguageTag(FInternationalization::Get().GetCurrentLanguage()->GetName());
+	if (Settings.DeviceModel.IsEmpty()) Settings.DeviceModel = DeviceModelName(FPlatformMisc::GetDeviceMakeAndModel());
+	if (Settings.AppVersion.IsEmpty()) Settings.AppVersion = GetDefault<UGeneralProjectSettings>()->ProjectVersion.TrimStartAndEnd();
+	// Nothing is sent while disabled or during automation, so no identity is created then.
+	if (Settings.bEnabled && !GIsAutomationTesting)
+	{
+		if (Settings.UserID.IsEmpty()) Settings.UserID = LoadOrCreateProfileID();
+		if (Settings.DeviceID.IsEmpty()) Settings.DeviceID = LoadOrCreateInstallationID();
+	}
+}
+
+FString OperatingSystemFamily(const FString& PlatformName)
+{
+	FString Name = PlatformName.TrimStartAndEnd();
+	// Target variants such as MacEditor or LinuxServer share their platform's family.
+	for (const TCHAR* Suffix : { TEXT("Editor"), TEXT("Client"), TEXT("Server"), TEXT("NoEditor") })
+	{
+		if (Name.Len() > FCString::Strlen(Suffix) && Name.EndsWith(Suffix))
+		{
+			Name.LeftChopInline(FCString::Strlen(Suffix));
+			break;
+		}
+	}
+	static const TPair<const TCHAR*, const TCHAR*> Families[] = {
+		{ TEXT("Windows"), TEXT("Windows") }, { TEXT("Win64"), TEXT("Windows") }, { TEXT("WinGDK"), TEXT("Windows") },
+		{ TEXT("Mac"), TEXT("macOS") }, { TEXT("Linux"), TEXT("Linux") }, { TEXT("LinuxArm64"), TEXT("Linux") },
+		{ TEXT("IOS"), TEXT("iOS") }, { TEXT("TVOS"), TEXT("tvOS") }, { TEXT("VisionOS"), TEXT("visionOS") },
+		{ TEXT("Android"), TEXT("Android") }, { TEXT("HTML5"), TEXT("Web") },
+		{ TEXT("PS4"), TEXT("PlayStation") }, { TEXT("PS5"), TEXT("PlayStation") },
+		{ TEXT("XboxOne"), TEXT("Xbox") }, { TEXT("XboxOneGDK"), TEXT("Xbox") }, { TEXT("XSX"), TEXT("Xbox") },
+		{ TEXT("Switch"), TEXT("Switch") }, { TEXT("Switch2"), TEXT("Switch") },
+	};
+	for (const auto& Family : Families)
+	{
+		if (Name.Equals(Family.Key, ESearchCase::IgnoreCase))
+		{
+			return Family.Value;
+		}
+	}
+	return PlatformName.TrimStartAndEnd();
+}
+
+FString LanguageTag(const FString& CultureName)
+{
+	TArray<FString> Parts;
+	CultureName.TrimStartAndEnd().Replace(TEXT("_"), TEXT("-")).ParseIntoArray(Parts, TEXT("-"), false);
+	const auto IsAscii = [](const FString& Part, bool bDigits) {
+		for (const TCHAR Character : Part)
+		{
+			if (Character > 127 || !(FChar::IsAlpha(Character) || (bDigits && FChar::IsDigit(Character))))
+			{
+				return false;
+			}
+		}
+		return true;
+	};
+	// A display name such as English is not a tag: the language subtag has two or three letters.
+	if (Parts.IsEmpty() || Parts[0].Len() < 2 || Parts[0].Len() > 3 || !IsAscii(Parts[0], false))
+	{
+		return {};
+	}
+	Parts[0].ToLowerInline();
+	for (int32 Index = 1; Index < Parts.Num(); ++Index)
+	{
+		FString& Part = Parts[Index];
+		if (Part.IsEmpty() || Part.Len() > 8 || !IsAscii(Part, true))
+		{
+			return Parts[0];
+		}
+		if (Part.Len() == 2 && IsAscii(Part, false))
+		{
+			Part.ToUpperInline();
+		}
+		else if (Part.Len() == 4 && IsAscii(Part, false))
+		{
+			Part = Part.Left(1).ToUpper() + Part.Mid(1).ToLower();
+		}
+	}
+	return FString::Join(Parts, TEXT("-"));
+}
+
+FString DeviceModelName(const FString& MakeAndModel)
+{
+	TArray<FString> Parts;
+	MakeAndModel.ParseIntoArray(Parts, TEXT("|"), true);
+	for (FString& Part : Parts)
+	{
+		Part.TrimStartAndEndInline();
+	}
+	Parts.RemoveAll([](const FString& Part) { return Part.IsEmpty() || Part.Equals(TEXT("Unknown"), ESearchCase::IgnoreCase); });
+	// The make often starts the model too, as in Apple|Apple M2.
+	if (Parts.Num() >= 2 && Parts[1].StartsWith(Parts[0], ESearchCase::IgnoreCase))
+	{
+		Parts.RemoveAt(0);
+	}
+	return FString::Join(Parts, TEXT(" "));
+}
+
+FString LoadOrCreateProfileID(const FString& SlotName)
+{
+	ISaveGameSystem* SaveGames = IPlatformFeaturesModule::Get().GetSaveGameSystem();
+	if (!SaveGames)
+	{
+		return {};
+	}
+	TArray<uint8> Data;
+	if (SaveGames->DoesSaveGameExist(*SlotName, 0) && SaveGames->LoadGame(false, *SlotName, 0, Data))
+	{
+		FString Existing;
+		FFileHelper::BufferToString(Existing, Data.GetData(), Data.Num());
+		Existing.TrimStartAndEndInline();
+		if (Private::IsUsableID(Existing))
+		{
+			return Existing;
+		}
+	}
+	const FString Value = Private::NewID();
+	const FTCHARToUTF8 Text(*Value);
+	if (!SaveGames->SaveGame(false, *SlotName, 0, TArray<uint8>(reinterpret_cast<const uint8*>(Text.Get()), Text.Length())))
+	{
+		UE_LOG(LogTestingFloor, Warning, TEXT("Testing Floor could not save its profile ID in save slot %s; events are sent without $user_id."), *SlotName);
+		return {};
+	}
+	return Value;
+}
+
+FString LoadOrCreateInstallationID(const FString& InPath)
+{
+	const FString Path = InPath.IsEmpty() ? FPaths::ProjectSavedDir() / TEXT("TestingFloorSdk/installation-id") : InPath;
+	FString Existing;
+	if (FFileHelper::LoadFileToString(Existing, *Path))
+	{
+		Existing.TrimStartAndEndInline();
+		if (Private::IsUsableID(Existing))
+		{
+			return Existing;
+		}
+	}
+	const FString Value = Private::NewID();
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
+	if (!FFileHelper::SaveStringToFile(Value, *Path))
+	{
+		UE_LOG(LogTestingFloor, Warning, TEXT("Testing Floor could not save its installation ID at %s; events are sent without $device_id."), *Path);
+		return {};
+	}
+	return Value;
+}
+
 bool FActivitySample::IsEmpty() const
 {
 	return !PlayerPosition.IsSet() && !CameraPosition.IsSet() && !CameraRotation.IsSet() && !CameraFOV.IsSet();
@@ -584,10 +789,10 @@ bool FActivitySample::IsEmpty() const
 TSharedRef<FClient> FClient::Create(FSettings Settings)
 {
 	if (!Settings.Recording.IsSet()) Settings.Recording = FRecordingContext::Discover();
-	if (Settings.EngineVersion.IsEmpty()) Settings.EngineVersion = FEngineVersion::Current().ToString();
-	if (Settings.OperatingSystem.IsEmpty()) Settings.OperatingSystem = FPlatformProperties::PlatformName();
-	if (Settings.Locale.IsEmpty()) Settings.Locale = FInternationalization::Get().GetCurrentCulture()->GetName();
+	ApplyEngineDefaults(Settings);
 	const auto Client = Create(MoveTemp(Settings), {GIsEditor, GIsAutomationTesting}, MakeHttpTransport());
+	Client->ScreenSizeSource = &Private::EngineViewportSize;
+	SetDefault(Client);
 	if (!GIsAutomationTesting)
 	{
 		const TWeakPtr<FClient> WeakClient = Client;
@@ -601,6 +806,21 @@ TSharedRef<FClient> FClient::Create(FSettings Settings)
 		}));
 	}
 	return Client;
+}
+
+TSharedPtr<FClient> FClient::GetDefault()
+{
+	return Private::DefaultClient().Pin();
+}
+
+void FClient::SetDefault(const TSharedPtr<FClient>& Client)
+{
+	check(IsInGameThread());
+	Private::DefaultClient() = Client;
+	if (Client.IsValid())
+	{
+		UTestingFloorTrackedObjectComponent::RegisterWaiting();
+	}
 }
 
 FClient::~FClient()
@@ -644,6 +864,8 @@ FClient::FClient(FSettings InSettings, FEnvironment InEnvironment, TSharedRef<IT
 	if (Initial.IsSet() && Initial->LeaseVersion == 0) LegacyRecordingFallback = Initial;
 	ObserveRecordingHandoff(Initial, Clock());
 	if (Initial.IsSet()) AttachRecording(Initial.GetValue());
+	// Handlers bind after construction, so the first broadcast is the first change.
+	NotifiedRecordingUUID = ExposedRecording.IsSet() ? ExposedRecording->RecordingUUID : FString();
 }
 
 void FClient::SetContextProvider(FContextProvider Provider)
@@ -738,10 +960,16 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 	// The SDK queues its own records directly. Its record name checks ignore case, so any casing is refused.
 	if (Name.StartsWith(Private::ReservedEventPrefix, ESearchCase::IgnoreCase))
 	{
-		if (!bWarnedReservedName)
+		bool bWarned = false;
+		WarnedReservedNames.Add(Name, &bWarned);
+		if (!bWarned)
 		{
-			bWarnedReservedName = true;
 			UE_LOG(LogTestingFloor, Warning, TEXT("Testing Floor ignores event \"%s\": names beginning with $tf_ are reserved for Testing Floor records."), *Name);
+		}
+		// The event never took a seq, so readers lose nothing: it is no recording drop and needs no keyframe.
+		if (IsCollecting())
+		{
+			++DroppedEvents;
 		}
 		return false;
 	}
@@ -814,6 +1042,7 @@ bool FClient::Enqueue(FEvent Record)
 		NoteDropped(1, Record.Recording.IsSet() ? 1 : 0);
 		return false;
 	}
+	StampRecord(Record);
 	Record.Sequence = NextSequence;
 	if (Private::Utf8Length(SerializeEvent(Record, Settings)) > Private::EventByteCap)
 	{
@@ -1118,6 +1347,7 @@ void FClient::UpdateRecordingContext(bool bForce)
 {
 	if (bShutdown || bRefreshingRecording) return;
 	TGuardValue<bool> Guard(bRefreshingRecording, true);
+	ON_SCOPE_EXIT { NotifyRecordingChanged(); };
 	const FDateTime Now = Clock();
 	const bool bCachedLeaseExpired = Settings.Recording.IsSet() && !bRecordingClosed && !bRecordingSuspended
 		&& Settings.Recording->LeaseVersion != 0 && !Settings.Recording->HasActiveLease(Now);
@@ -1147,7 +1377,9 @@ void FClient::UpdateRecordingContext(bool bForce)
 			if (IsCollecting()) SendBufferedRecords(false);
 			FinishRecording(TEXT("recording_replaced"));
 		}
-		if (AttachRecording(Candidate.GetValue()) && IsCollecting()) SendAttachmentKeyframes();
+		const bool bAttached = AttachRecording(Candidate.GetValue());
+		NotifyRecordingChanged();
+		if (bAttached && IsCollecting()) SendAttachmentKeyframes();
 	}
 	else if (Settings.Recording.IsSet() && !bRecordingClosed)
 	{
@@ -1171,6 +1403,7 @@ void FClient::UpdateRecordingContext(bool bForce)
 				if (bResumed)
 				{
 					ResetRecordingBaselines();
+					NotifyRecordingChanged();
 					if (IsCollecting()) SendAttachmentKeyframes();
 				}
 				WriteRecordingStatus(Settings.Recording.GetValue(), State == EState::Rejected ? TEXT("disabled") : TEXT("attached"), State == EState::Rejected ? TEXT("collector_rejected") : TEXT("none"));
@@ -1229,10 +1462,13 @@ void FClient::FinishRecording(const TCHAR* Reason)
 	ResetMovement();
 	CompletedRecordings.Add(Settings.Recording->RecordingUUID);
 	WriteRecordingStatus(Settings.Recording.GetValue(), TEXT("closed"), Reason);
+	// A replacement notifies once, with the new recording, when the refresh finishes.
+	if (!bRefreshingRecording) NotifyRecordingChanged();
 	if (!bRecordingRegistered) return;
 	FEvent Marker{ FGuid::NewGuid(), Private::CompletionRecordName, Clock(), SessionID, {} };
 	Marker.Recording = Settings.Recording;
 	Marker.Properties.Set(TEXT("interrupted"), bRecordingInterrupted);
+	StampRecord(Marker);
 	Marker.Sequence = NextSequence++;
 	// Control records must remain possible even when the gameplay queue is full.
 	Queue.Add(MoveTemp(Marker));
@@ -1330,6 +1566,10 @@ void FClient::CompleteSend(int32 ResponseCode, bool bSucceeded)
 
 void FClient::Shutdown(double TimeoutSeconds)
 {
+	if (Private::DefaultClient().Pin().Get() == this)
+	{
+		Private::DefaultClient().Reset();
+	}
 	FTSTicker::RemoveTicker(TickerHandle);
 	TickerHandle.Reset();
 	FTSTicker::RemoveTicker(RecordingTickerHandle);
@@ -1489,6 +1729,37 @@ void FClient::RecordTeleport(const FVector& StartCentimeters, const FVector& End
 
 uint64 FClient::TrackObject(const FString& Kind, FPositionSource PositionCentimeters, const FString& ID)
 {
+	return AddTrackedObject(Kind, MoveTemp(PositionCentimeters), ID, TEXT("gone"));
+}
+
+uint64 FClient::TrackObject(const FString& Kind, AActor* Actor, const FString& ID)
+{
+	if (!IsValid(Actor))
+	{
+		return 0;
+	}
+	const TWeakObjectPtr<AActor> Weak(Actor);
+	return AddTrackedObject(Kind, [Weak] {
+		const AActor* Live = Weak.Get();
+		return Live ? TOptional<FVector>(Live->GetActorLocation()) : TOptional<FVector>();
+	}, ID, TEXT("destroyed"));
+}
+
+uint64 FClient::TrackObject(const FString& Kind, USceneComponent* Component, const FString& ID)
+{
+	if (!IsValid(Component))
+	{
+		return 0;
+	}
+	const TWeakObjectPtr<USceneComponent> Weak(Component);
+	return AddTrackedObject(Kind, [Weak] {
+		const USceneComponent* Live = Weak.Get();
+		return Live ? TOptional<FVector>(Live->GetComponentLocation()) : TOptional<FVector>();
+	}, ID, TEXT("destroyed"));
+}
+
+uint64 FClient::AddTrackedObject(const FString& Kind, FPositionSource PositionCentimeters, const FString& ID, const TCHAR* GoneReason)
+{
 	check(IsInGameThread());
 	if (!ConfigurationPermitted() || !PositionCentimeters)
 	{
@@ -1525,6 +1796,7 @@ uint64 FClient::TrackObject(const FString& Kind, FPositionSource PositionCentime
 		return 0;
 	}
 	FTrackedObject Object{ ObjectID, ObjectKind, MoveTemp(PositionCentimeters) };
+	Object.GoneReason = GoneReason;
 	if (IsCollecting()) Object.LastKnown = Private::FinitePosition(Object.Position());
 	const uint64 Token = NextObjectToken++;
 	ObjectTokens.Add(ObjectID, Token);
@@ -1702,7 +1974,8 @@ bool FClient::CheckObjects()
 		const TOptional<FVector> Position = Reading;
 		if (!Position.IsSet())
 		{
-			RemoveObject(Token, TEXT("gone"));
+			const FString Reason = Object.GoneReason;
+			RemoveObject(Token, Reason);
 			continue;
 		}
 		FObjectRows Changes{ Object.ID, Object.Kind };
@@ -1746,7 +2019,15 @@ bool FClient::CheckObjects()
 
 void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
 {
-	const FDateTime Timestamp = Clock();
+	// Split records of one check share one $time. Each check is later than the last, so readers that
+	// order by time keep consecutive checks apart.
+	FDateTime Timestamp = Clock();
+	if (!Rows.IsEmpty())
+	{
+		const int64 Milliseconds = FMath::Max(Timestamp.GetTicks() / ETimespan::TicksPerMillisecond, LastObjectCheckMilliseconds + 1);
+		LastObjectCheckMilliseconds = Milliseconds;
+		Timestamp = FDateTime(Milliseconds * ETimespan::TicksPerMillisecond);
+	}
 	TArray<FObjectRows> Refused;
 	for (int32 Start = 0, End = 0; Start < Rows.Num(); Start = End)
 	{
@@ -1845,6 +2126,44 @@ const FString& FClient::GetUserID() const
 {
 	return Settings.UserID;
 }
+FClient::FRecordingChanged& FClient::OnRecordingChanged()
+{
+	return RecordingChanged;
+}
+
+FString FClient::GetCollectionReason() const
+{
+	if (IsCollecting()) return {};
+	if (bShutdown) return TEXT("shutdown");
+	if (Environment.bAutomation) return TEXT("automation");
+	if (!Settings.bEnabled) return TEXT("master_disabled");
+	if (State == EState::NotConfigured) return TEXT("missing_configuration");
+	if (State == EState::Rejected) return TEXT("collector_rejected");
+	return TEXT("editor_policy_disabled");
+}
+
+void FClient::NotifyRecordingChanged()
+{
+	const FString Current = ExposedRecording.IsSet() ? ExposedRecording->RecordingUUID : FString();
+	if (Current == NotifiedRecordingUUID)
+	{
+		return;
+	}
+	NotifiedRecordingUUID = Current;
+	// A copy, so a handler that changes the recording cannot change what later handlers receive.
+	const TOptional<FRecordingContext> Recording = ExposedRecording;
+	RecordingChanged.Broadcast(Recording);
+}
+
+void FClient::StampRecord(FEvent& Record) const
+{
+	Record.bEditor = Environment.bEditor;
+	if ((Record.ScreenSize.X <= 0 || Record.ScreenSize.Y <= 0) && (Settings.ScreenSize.X <= 0 || Settings.ScreenSize.Y <= 0) && ScreenSizeSource)
+	{
+		Record.ScreenSize = ScreenSizeSource();
+	}
+}
+
 const TOptional<FRecordingContext>& FClient::GetRecordingContext() const
 {
 	return ExposedRecording;

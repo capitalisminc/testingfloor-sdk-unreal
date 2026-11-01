@@ -28,28 +28,29 @@
   },
   "request_fields": [
     { "key": "$write_key", "required": true, "type": "string", "description": "The game's telemetry key for the environment being tested. It is not an account API key." },
-    { "key": "$sent_at", "required": false, "type": "timestamp", "description": "When the client sent the request, as an ISO 8601 UTC time." },
+    { "key": "$sent_at", "required": false, "type": "timestamp", "description": "When the client sent the request, as an ISO 8601 time in UTC. Either a Z suffix or a +00:00 offset is accepted." },
     { "key": "events", "required": true, "type": "object[]", "description": "The events in this request, each with the event fields below." }
   ],
   "event_fields": [
     { "key": "$id", "required": true, "type": "string", "description": "A new UUID for every event. Retries reuse it, so the warehouse can drop duplicates." },
     { "key": "$name", "required": true, "type": "string", "description": "The event name, such as level_started. Names beginning with $tf_ are reserved for the records listed under platform records." },
-    { "key": "$time", "required": true, "type": "timestamp", "description": "When the event happened, as an ISO 8601 UTC time with milliseconds." },
+    { "key": "$time", "required": true, "type": "timestamp", "description": "When the event happened, as an ISO 8601 time in UTC. SDKs 0.5.0 and later send exactly millisecond precision with a Z suffix, such as 2026-04-19T18:32:00.000Z. A +00:00 offset and finer fractions, such as the seven digits earlier Unity SDKs wrote, are still accepted." },
     { "key": "$schema", "required": true, "type": "integer", "description": "The wire schema version. Send 2. Version 2 adds session state and tracked-object records; version 1 events are still accepted." },
     { "key": "$session_id", "required": false, "type": "string", "description": "One ID per game launch or editor Play run. Testing Floor shows each as one run." },
-    { "key": "$user_id", "required": false, "type": "string", "description": "A stable player ID your game assigns. Shown as the Player ID." },
-    { "key": "$device_id", "required": false, "type": "string", "description": "A stable ID for the installation. Used as the Player ID when $user_id is missing." },
+    { "key": "$user_id", "required": false, "type": "string", "description": "A stable player ID for the person playing. Shown as the Player ID. SDKs 0.5.0 and later generate a profile ID, kept in the game's saved data, and send it unless your game sets its own. The Unreal SDK 0.4 and earlier sends it only when your game sets it." },
+    { "key": "$device_id", "required": false, "type": "string", "description": "A stable ID for the installation. Used as the Player ID when $user_id is missing. SDKs 0.5.0 and later generate it unless your game sets its own. A run with neither ID has no Player ID, so runs from the same person cannot be grouped." },
     { "key": "$tf", "required": false, "type": "object", "description": "Context the SDK or Testing Floor attaches. Its keys are listed under context fields." }
   ],
   "context_fields": [
     { "key": "sdk_version", "type": "string", "set_by": "sdk", "description": "Version of the SDK that sent the event.", "analytics": { "label": "SDK version", "dimension": true } },
-    { "key": "app_version", "type": "string", "set_by": "sdk", "description": "The game's build version, from the engine's version setting. Map it as the game's app version in telemetry settings to group and filter by build.", "environment_field": "build_version" },
+    { "key": "editor", "type": "boolean", "set_by": "sdk", "description": "True when the record comes from a Play session inside the engine editor rather than a built game.", "analytics": { "label": "Editor run", "dimension": true } },
+    { "key": "app_version", "type": "string", "set_by": "sdk", "description": "The game's build version, from the engine's version setting. Left out when the engine has none. Map it as the game's app version in telemetry settings to group and filter by build.", "environment_field": "build_version" },
     { "key": "engine", "type": "string", "set_by": "sdk", "description": "Engine name and version, such as Unity 6000.3.7f1.", "analytics": { "label": "Engine", "dimension": true }, "environment_field": "engine" },
-    { "key": "os", "type": "string", "set_by": "sdk", "description": "The platform the game runs on, as the engine names it.", "analytics": { "label": "OS", "dimension": true }, "environment_field": "platform" },
-    { "key": "device_model", "type": "string", "set_by": "sdk", "description": "The device or hardware model the engine reports.", "analytics": { "label": "Device", "dimension": true } },
-    { "key": "locale", "type": "string", "set_by": "sdk", "description": "The system language or culture the engine reports.", "analytics": { "label": "Locale", "dimension": true }, "environment_field": "system_language" },
-    { "key": "screen_width", "type": "integer", "set_by": "sdk", "description": "Width in pixels of the game's screen or viewport." },
-    { "key": "screen_height", "type": "integer", "set_by": "sdk", "description": "Height in pixels of the game's screen or viewport." },
+    { "key": "os", "type": "string", "set_by": "sdk", "description": "The operating system family: Windows, macOS, Linux, iOS, Android, tvOS, visionOS, Web, PlayStation, Xbox or Switch, or the engine's platform name for anything else. Unity SDKs before 0.5.0 sent engine names such as WindowsPlayer or OSXEditor.", "analytics": { "label": "OS", "dimension": true }, "environment_field": "platform" },
+    { "key": "device_model", "type": "string", "set_by": "sdk", "description": "The device or hardware model the SDK reads from the engine.", "analytics": { "label": "Device", "dimension": true } },
+    { "key": "locale", "type": "string", "set_by": "sdk", "description": "The player's language as a BCP 47 tag, such as en-US. Unity SDKs before 0.5.0 sent the system language name, such as English.", "analytics": { "label": "Locale", "dimension": true }, "environment_field": "system_language" },
+    { "key": "screen_width", "type": "integer", "set_by": "sdk", "description": "Width in pixels of the game's screen or viewport, read from the engine." },
+    { "key": "screen_height", "type": "integer", "set_by": "sdk", "description": "Height in pixels of the game's screen or viewport, read from the engine." },
     { "key": "recording_uuid", "type": "string", "set_by": "sdk", "description": "The desktop app recording this event belongs to. Links telemetry to video." },
     { "key": "playtest_id", "type": "integer", "set_by": "sdk", "description": "The playtest the desktop app launched the game for." },
     { "key": "seq", "type": "integer", "set_by": "sdk", "description": "Starts at 1 for each run and increases by one for every record the SDK queues. Orders records that share a time and reveals dropped records." },
@@ -75,7 +76,7 @@
   ],
   "reserved": [
     { "pattern": "$", "kind": "property_prefix", "rule": "disallowed", "description": "Property keys may not begin with $. The collector rejects events with $ fields it does not know, and SDKs drop such properties." },
-    { "pattern": "$tf_", "kind": "event_name_prefix", "rule": "platform_only", "description": "Event names beginning with $tf_ are platform records. Games must not send them." },
+    { "pattern": "$tf_", "kind": "event_name_prefix", "rule": "platform_only", "description": "Event names beginning with $tf_ are platform records. Games must not send them; SDKs 0.5.0 and later refuse them with a warning. Earlier SDKs passed them through, so such an event can be treated as a platform record or hidden from analytics." },
     { "pattern": "tf.recording_uuid", "kind": "property", "rule": "legacy", "description": "Early SDKs sent the recording UUID as this property. It is still read; current SDKs use $tf.recording_uuid." },
     { "pattern": "recording_id", "kind": "property", "rule": "platform_only", "description": "Testing Floor adds the recording's ID to desktop app events it relays." }
   ],
@@ -144,7 +145,7 @@
     { "key": "sample.y", "type": "number[]", "unit": "engine units", "description": "Object positions." },
     { "key": "sample.z", "type": "number[]", "unit": "engine units", "description": "Object positions." },
     { "key": "removed.id", "type": "string[]", "description": "Objects removed in this record. Each removal carries its final position as a sample." },
-    { "key": "removed.reason", "type": "string[]", "description": "Why each object was removed: destroyed, gone, disabled, or a reason the game gives." },
+    { "key": "removed.reason", "type": "string[]", "description": "Why each object was removed: destroyed, gone, disabled, removed when the game removes an object without giving a reason, or a reason the game gives." },
     { "key": "state.id", "type": "string[]", "description": "Objects whose state changed, one per state entry." },
     { "key": "state.key", "type": "string[]", "description": "The state key for each entry. The key label names the object on maps." },
     { "key": "state.value", "type": "scalar[]", "description": "The new value for each entry: a string, number or boolean." }

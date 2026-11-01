@@ -37,7 +37,14 @@ Client = TestingFloor::FClient::Create(Settings);
 ```
 
 The default factory ticks on Unreal's core ticker, including during pause, and
-reads the current recorder handoff. It fills engine, OS, and locale metadata.
+reads the current recorder handoff. It fills any `FSettings` field you leave
+empty from the engine: the engine version, the OS family (such as `Windows` or
+`macOS`), the current language as a BCP 47 tag such as `en-US`, the device model
+that `FPlatformMisc::GetDeviceMakeAndModel` reports, and the project version from
+**Project Settings > Description**. Each event also carries the game viewport's
+size unless your activity source or `FSettings::ScreenSize` supplies one. Context
+the SDK cannot determine is left out, never sent as an empty string. Every record
+carries `$tf.editor`, `true` for Play inside the editor.
 Ordinary editor collection is off by default. `bEnableInEditorWhileRecording`
 defaults to true, so a live desktop recording can temporarily enable collection
 without enabling ordinary editor analytics. `bEnableInEditor` still opts into
@@ -45,10 +52,20 @@ always-on editor collection. Set both options false for no editor telemetry.
 Recording never overrides `bEnabled=false`, automation restrictions, missing
 credentials, or an empty endpoint. Keep real write keys out of source control.
 
-Supply optional `DeviceID` (a stable installation UUID persisted by your game),
-`UserID` (your profile identity), `AppVersion`, and other metadata in `FSettings`.
-The SDK generates a fresh `GetPlaySessionID()` for every client. No synthetic
-session bookend events are emitted.
+The default factory also gives each player two IDs. Testing Floor shows `$user_id`
+as the Player ID and falls back to `$device_id` when it is missing.
+
+- **Profile ID** (`$user_id`): kept in the `TestingFloorProfile` slot of the
+  platform save system, the same storage as the game's saves (`Saved/SaveGames`
+  on desktop). It follows the player wherever those saves sync, such as through
+  Steam Cloud or a console's saved data.
+- **Installation ID** (`$device_id`): kept in `Saved/TestingFloorSdk/installation-id`,
+  which stays on this machine.
+
+Set `FSettings::UserID` or `FSettings::DeviceID` to send your own IDs instead. No
+ID is created while `bEnabled` is false or automation tests run. The SDK generates
+a fresh `GetPlaySessionID()` for every client. No synthetic session bookend
+events are emitted.
 
 At the end of the play session, drain before releasing the client:
 
@@ -65,7 +82,9 @@ Custom transports and deterministic hosts can use the advanced
 `Create(Settings, Environment, Transport, Clock, RecordingSource)` overload.
 Call `Tick()` or `Tick(monotonicSeconds)` yourself, including during pause, and
 pass the real automation flag. This overload does not sample gameplay through an
-automatic ticker or discover host metadata. Without an injected
+automatic ticker, read engine metadata or create IDs, and it leaves out any context
+you do not set. Call `TestingFloor::ApplyEngineDefaults(Settings)` first for the
+same metadata and IDs as the default factory. Without an injected
 `RecordingSource`, it installs a separate context-only monitor in editor,
 standalone and packaged hosts, so a host that gates its gameplay tick on
 `GetState()` can still attach a recording.
@@ -108,6 +127,20 @@ SDK settings. `GetRecordingContext()` exposes only an attached telemetry
 association. Use the fresh `GetRecordingHandoff()` for independent capture
 policy such as QR suppression, even when telemetry is disabled or unconfigured.
 
+`OnRecordingChanged()` broadcasts the new recording context when one attaches,
+renews after suspension or replaces another, and an unset context when it closes
+or is suspended. Handlers run before the recording's state and object keyframes,
+so state they set is in the first keyframe. `IsCollecting()` says whether events
+are accepted now. When they are not, `GetCollectionReason()` returns `shutdown`,
+`automation`, `master_disabled`, `missing_configuration`, `collector_rejected` or
+`editor_policy_disabled`.
+
+```cpp
+Client->OnRecordingChanged().AddLambda([](const TOptional<TestingFloor::FRecordingContext>& Recording) {
+    UE_LOG(LogTemp, Display, TEXT("Testing Floor recording: %s"), Recording.IsSet() ? *Recording->RecordingUUID : TEXT("none"));
+});
+```
+
 ## Track Events
 
 ```cpp
@@ -117,8 +150,10 @@ Client->Track(TEXT("weapon_fire"), TestingFloor::FProperties()
 ```
 
 `Track` returns whether the event entered the queue, not whether it reached the
-server. Event names beginning with `$tf_` are reserved for Testing Floor
-records, so `Track` refuses them and logs one warning. Properties support
+server. Event names beginning with `$tf_`, in any casing, are reserved for
+Testing Floor records. `Track` refuses them and logs one warning per name. Each
+refusal counts in `GetDroppedEventCount` while collecting, but not toward a
+recording's `dropped_events`. Properties support
 strings, GUIDs, booleans, signed 32/64-bit integers, finite floats/doubles,
 string arrays, and integer arrays. `SetIfPresent` omits empty or
 whitespace-only strings. `SetVector` flattens vectors into `.x`, `.y`, and `.z`
@@ -169,28 +204,36 @@ context on every event.
 
 ## Tracked Objects
 
-Register NPCs, props, vehicles and projectiles to draw their paths on the map:
+Register NPCs, props, vehicles and projectiles to draw their paths on the map.
+Without code, add a **Testing Floor Tracked Object** component
+(`UTestingFloorTrackedObjectComponent`) to an actor or Blueprint and set its
+`Kind`, and optionally its `ID`. It tracks the owner's location from BeginPlay
+through the default client, removes the object as `disabled` when the component
+is deactivated or unregistered, and as `destroyed` when play ends or the actor is
+destroyed. Components that begin play before a client exists register when one
+does. A client made with the advanced overload becomes the default through
+`FClient::SetDefault`.
+
+From code, pass an actor or scene component. The SDK holds it weakly and removes
+it as `destroyed` once it is gone:
 
 ```cpp
-const TWeakObjectPtr<AActor> Weak = Guard;
-const uint64 Token = Client->TrackObject(TEXT("guard"), [Weak]() -> TOptional<FVector> {
-    return Weak.IsValid() ? TOptional<FVector>(Weak->GetActorLocation()) : TOptional<FVector>();
-}, TEXT("captain_example"));
+const uint64 Token = Client->TrackObject(TEXT("guard"), Guard, TEXT("captain_example"));
 Client->SetObjectState(Token, TEXT("behavior"), TEXT("searching"));
-Client->RemoveObject(Token, TEXT("destroyed"));
+Client->RemoveObject(Token, TEXT("knocked_out"));
 ```
 
 Pass a stable ID when your events refer to the object; otherwise the SDK assigns
-`kind#n`, counting per kind for each play session. Hold engine objects through
-weak pointers. A position source that returns unset removes the object with
-reason `gone`. Pass `destroyed` when the engine object is destroyed and
-`disabled` when tracking is turned off; any other reason string is passed
-through. Registering a live ID again replaces that object.
+`kind#n`, counting per kind for each play session. For other positions, pass a
+`FPositionSource` callback; a callback that returns unset removes the object with
+reason `gone`. Removing an object without a reason sends `removed`; any other
+reason string is passed through. Registering a live ID again replaces that object.
 
 The SDK checks live objects 4 times a second in unscaled time
 (`FSettings::ObjectChecksPerSecond`, 1–10). It sends a sample when an object is
 registered and afterwards only when the object has moved at least 0.25 m
-(25 cm). Removal sends the final position and the reason. Object state values
+(25 cm). Each check's records get a `$time` later than the previous check's.
+Removal sends the final position and the reason. Object state values
 are scalars, and only changed values are sent. Every 5 minutes, and after a drop,
 a keyframe repeats every live object with its position and state.
 

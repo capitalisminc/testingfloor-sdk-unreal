@@ -4,6 +4,9 @@
 #include "Containers/Ticker.h"
 #include "Dom/JsonValue.h"
 
+class AActor;
+class USceneComponent;
+
 namespace TestingFloor
 {
 class FClient;
@@ -112,6 +115,8 @@ struct FEvent
 	/** Play-session record counter (`$tf.seq`), assigned when the record is queued. Zero omits it. */
 	int64 Sequence = 0;
 	bool bKeyframe = false;
+	/** Whether the record comes from Play inside the editor (`$tf.editor`), captured when it is queued. */
+	bool bEditor = false;
 };
 
 /** Sources supply native Unreal centimeters and degrees. Movement metrics/thresholds remain meters. */
@@ -157,8 +162,27 @@ TESTINGFLOORSDK_API TSharedRef<ITransport> MakeHttpTransport();
 TESTINGFLOORSDK_API bool ShouldCollect(const FSettings& Settings, const FEnvironment& Environment, FDateTime Now = FDateTime::UtcNow());
 TESTINGFLOORSDK_API FString SerializeEvent(const FEvent& Event, const FSettings& Settings);
 TESTINGFLOORSDK_API FString BuildBatch(TConstArrayView<FEvent> Events, const FSettings& Settings, FDateTime SentAt, int32& OutConsumed, int32* OutWritten = nullptr, int32* OutRecordingDropped = nullptr);
+/**
+ * Fill each unset field the way the default factory does: engine version, OS family, language tag,
+ * device model and project version. While Settings is enabled and automation is not running, it also
+ * loads or creates the profile ID (UserID) and installation ID (DeviceID). Values already set are kept.
+ */
+TESTINGFLOORSDK_API void ApplyEngineDefaults(FSettings& Settings);
+/** The `$tf.os` family for an Unreal platform name, such as macOS for Mac, or the name itself when it has no family. */
+TESTINGFLOORSDK_API FString OperatingSystemFamily(const FString& PlatformName);
+/** A BCP 47 tag such as en-US for an Unreal culture name, the language alone when the rest is malformed, or empty. */
+TESTINGFLOORSDK_API FString LanguageTag(const FString& CultureName);
+/** A device model from FPlatformMisc::GetDeviceMakeAndModel's `make|model` text, such as `Apple iPhone14,2`. */
+TESTINGFLOORSDK_API FString DeviceModelName(const FString& MakeAndModel);
+/** The profile ID sent as `$user_id`, kept in a slot of the platform save system so it travels with the player's saves. Empty if it cannot be saved. */
+TESTINGFLOORSDK_API FString LoadOrCreateProfileID(const FString& SlotName = TEXT("TestingFloorProfile"));
+/** The installation ID sent as `$device_id`, kept in a file in the project's Saved folder on this machine. Empty if it cannot be saved. */
+TESTINGFLOORSDK_API FString LoadOrCreateInstallationID(const FString& Path = {});
 
-/** Game-thread native client. No game module, UObjects, assets, or global singleton. */
+/**
+ * Game-thread native client, not a UObject. The default factory also makes it the default client that
+ * UTestingFloorTrackedObjectComponent uses.
+ */
 class TESTINGFLOORSDK_API FClient final : public TSharedFromThis<FClient>
 {
 public:
@@ -168,13 +192,25 @@ public:
 	using FRecordingSource = TFunction<TOptional<FRecordingContext>(FDateTime)>;
 	/** Returns native centimeters, or unset once the object is gone. */
 	using FPositionSource = TFunction<TOptional<FVector>()>;
+	/** The new attached recording, or unset when the recording detaches, closes or is suspended. */
+	using FRecordingChanged = TMulticastDelegate<void(const TOptional<FRecordingContext>&)>;
 
-	/** Create an automatically ticked client using the engine environment and HTTP transport. */
+	/**
+	 * Create an automatically ticked client using the engine environment and HTTP transport. It applies
+	 * ApplyEngineDefaults, reads the game viewport for `$tf.screen_*`, and becomes the default client.
+	 */
 	static TSharedRef<FClient> Create(FSettings Settings);
+	/** The client tracked-object components use, if it is still alive. */
+	static TSharedPtr<FClient> GetDefault();
+	/** Replace the default client, such as one made by the advanced overload. Components waiting for a client register with it. */
+	static void SetDefault(const TSharedPtr<FClient>& Client);
 	~FClient();
 	FClient(const FClient&) = delete;
 	FClient& operator=(const FClient&) = delete;
-	/** Advanced creation seam for custom transports and deterministic clocks. */
+	/**
+	 * Advanced creation seam for custom transports and deterministic clocks. It reads no engine metadata or
+	 * identity: call ApplyEngineDefaults first for those. Unset context is left out of every record.
+	 */
 	static TSharedRef<FClient> Create(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock = [] { return FDateTime::UtcNow(); }, FRecordingSource RecordingSource = {});
 	/** Small values that describe each moment, such as level, health and game clock. Added to every event. */
 	void SetContextProvider(FContextProvider Provider);
@@ -214,6 +250,10 @@ public:
 	 * A position source that returns unset removes the object with reason `gone`.
 	 */
 	uint64 TrackObject(const FString& Kind, FPositionSource PositionCentimeters, const FString& ID = {});
+	/** Track an actor's location. The SDK holds it weakly and removes it with reason `destroyed` once it is gone. */
+	uint64 TrackObject(const FString& Kind, AActor* Actor, const FString& ID = {});
+	/** Track a scene component's world location. The SDK holds it weakly and removes it with reason `destroyed` once it is gone. */
+	uint64 TrackObject(const FString& Kind, USceneComponent* Component, const FString& ID = {});
 	void SetObjectState(uint64 Token, const FString& Key, const FString& Value);
 	void SetObjectState(uint64 Token, const FString& Key, const TCHAR* Value);
 	void SetObjectState(uint64 Token, const FString& Key, int32 Value);
@@ -234,6 +274,15 @@ public:
 	const TOptional<FRecordingContext>& GetRecordingContext() const;
 	/** Live desktop handoff for independent capture policy, including QR suppression. */
 	TOptional<FRecordingContext> GetRecordingHandoff() const;
+	/** Broadcast when GetRecordingContext changes, before the new recording's state and object keyframes are queued. */
+	FRecordingChanged& OnRecordingChanged();
+	/** Whether events are accepted now, including the editor recording policy. */
+	bool IsCollecting() const;
+	/**
+	 * Why collection is inactive, or empty while collecting: `shutdown`, `automation`, `master_disabled`,
+	 * `missing_configuration`, `collector_rejected` or `editor_policy_disabled`.
+	 */
+	FString GetCollectionReason() const;
 	int32 GetPendingEventCount() const;
 	int32 GetDroppedEventCount() const;
 	const TArray<FEvent>& GetQueuedEvents() const;
@@ -270,8 +319,11 @@ private:
 	void SampleMovement(double NowSeconds, const FActivitySample& Sample);
 	void EmitMovement(const TCHAR* Reason, double Distance, double Duration, double Rotation, double FOV, double CameraDistance);
 	void FillActivityContext(FProperties& Properties, const FActivitySample& Sample) const;
-	bool IsCollecting() const;
+	/** Capture the record's editor flag and, when no other source gives one, the engine viewport size. */
+	void StampRecord(FEvent& Record) const;
 	bool Enqueue(FEvent Record);
+	void NotifyRecordingChanged();
+	uint64 AddTrackedObject(const FString& Kind, FPositionSource PositionCentimeters, const FString& ID, const TCHAR* GoneReason);
 	/** RecordingCount of the dropped records were attached to the recording; they count toward `dropped_events`. */
 	void NoteDropped(int32 Count, int32 RecordingCount = 0);
 	TOptional<FRecordingContext> ActiveRecording() const;
@@ -306,7 +358,14 @@ private:
 	double NextRetrySeconds = 0.0;
 	double RetryDelaySeconds = 1.0;
 	int32 DroppedEvents = 0;
-	bool bWarnedReservedName = false;
+	/** Compares names exactly: the same name in another casing is another name. */
+	struct FExactNameKeyFuncs : BaseKeyFuncs<FString, FString>
+	{
+		static const FString& GetSetKey(const FString& Element) { return Element; }
+		static bool Matches(const FString& A, const FString& B) { return A.Equals(B, ESearchCase::CaseSensitive); }
+		static uint32 GetKeyHash(const FString& Key) { return GetTypeHash(Key); }
+	};
+	TSet<FString, FExactNameKeyFuncs> WarnedReservedNames;
 	bool bRequestInFlight = false;
 	bool bShutdown = false;
 	bool bFlushRequested = false;
@@ -332,6 +391,8 @@ private:
 		TOptional<FVector> LastSent;
 		TMap<FString, TSharedPtr<FJsonValue>> State;
 		TArray<FString> ChangedState;
+		/** The removal reason once the position source returns unset. */
+		FString GoneReason = TEXT("gone");
 	};
 	struct FObjectRows
 	{
@@ -352,6 +413,11 @@ private:
 	bool bObjectKeyframeDue = false;
 	double ObjectKeyframeSeconds = -1.0;
 	bool bWarnedObjectLimit = false;
+	/** `$time` of the last object check, in milliseconds. Each check is sent later than the one before. */
+	int64 LastObjectCheckMilliseconds = 0;
+	TFunction<FIntPoint()> ScreenSizeSource;
+	FRecordingChanged RecordingChanged;
+	FString NotifiedRecordingUUID;
 
 	TOptional<FActivitySample> LastSample;
 	bool bMoving = false;

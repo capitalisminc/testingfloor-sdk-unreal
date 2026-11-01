@@ -795,4 +795,84 @@ bool FTestingFloorLegacyCaptureFallbackTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecordingChangedTest, "TestingFloor.Sdk.RecordingChangedAndCollectionStatus", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorRecordingChangedTest::RunTest(const FString& Parameters)
+{
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current;
+	const auto Client = TestingFloor::FClient::Create(TestingFloorRecordingTests::Settings(), { true, false }, MakeShared<TestingFloorRecordingTests::FCapturingTransport>(),
+		[&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	TArray<FString> Changes;
+	Client->OnRecordingChanged().AddLambda([&Changes, &Client](const TOptional<TestingFloor::FRecordingContext>& Recording) {
+		const FString Name = Recording.IsSet() ? Recording->RecordingUUID : FString(TEXT("none"));
+		Changes.Add(Name);
+		Client->SetState(TEXT("example.recording"), Name);
+	});
+	TestFalse(TEXT("A dormant editor Play run is not collecting"), Client->IsCollecting());
+	TestEqual(TEXT("Dormant reason"), Client->GetCollectionReason(), FString(TEXT("editor_policy_disabled")));
+
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-a"), Directory / TEXT("a"), Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.0);
+	TestTrue(TEXT("An attached editor Play run collects"), Client->IsCollecting());
+	TestEqual(TEXT("No reason while collecting"), Client->GetCollectionReason(), FString());
+	const TestingFloor::FEvent* Keyframe = Client->GetQueuedEvents().FindByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_state") && Event.bKeyframe; });
+	TF_REQUIRE(Keyframe, "Attachment queues a state keyframe");
+	const TSharedPtr<FJsonValue>* Value = Keyframe->Properties.GetValues().Find(TEXT("example.recording"));
+	TestTrue(TEXT("Handlers run before the attachment keyframe"), Value && Value->IsValid() && (*Value)->AsString() == TEXT("recording-a"));
+
+	Now += FTimespan::FromSeconds(6);
+	Client->Tick(6.0);
+	TestEqual(TEXT("A suspended lease blocks editor collection"), Client->GetCollectionReason(), FString(TEXT("editor_policy_disabled")));
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-a"), Directory / TEXT("a"), Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(6.25);
+	Current = TestingFloorRecordingTests::Lease(TEXT("recording-b"), Directory / TEXT("b"), Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(6.5);
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Current->TelemetryDirectory / TEXT("closed.json")));
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(6.75);
+	TestEqual(TEXT("Attach, suspend, renew, replace and close each notify once"), FString::Join(Changes, TEXT(",")),
+		FString(TEXT("recording-a,none,recording-a,recording-b,none")));
+	Client->Shutdown(0.0);
+	TestEqual(TEXT("A shut-down client says so"), Client->GetCollectionReason(), FString(TEXT("shutdown")));
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorCollectionReasonTest, "TestingFloor.Sdk.CollectionReasons", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorCollectionReasonTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorRecordingTests;
+	const auto Reason = [](const TestingFloor::FSettings& ClientSettings, TestingFloor::FEnvironment Environment) {
+		return TestingFloor::FClient::Create(ClientSettings, Environment, MakeShared<FTransport>())->GetCollectionReason();
+	};
+	TestEqual(TEXT("A configured game collects"), Reason(Settings(), {}), FString());
+	TestEqual(TEXT("Automation"), Reason(Settings(), { false, true }), FString(TEXT("automation")));
+	auto Disabled = Settings();
+	Disabled.bEnabled = false;
+	TestEqual(TEXT("Master switch"), Reason(Disabled, {}), FString(TEXT("master_disabled")));
+	auto Unconfigured = Settings();
+	Unconfigured.WriteKey.Reset();
+	TestEqual(TEXT("Missing write key"), Reason(Unconfigured, {}), FString(TEXT("missing_configuration")));
+	TestEqual(TEXT("Editor without a recording"), Reason(Settings(), { true, false }), FString(TEXT("editor_policy_disabled")));
+
+	class FRejectingTransport final : public TestingFloor::ITransport
+	{
+	public:
+		virtual void Send(const FString& Endpoint, const FString& Body, TFunction<void(int32, bool)> Completion) override
+		{
+			Completion(401, false);
+		}
+	};
+	const auto Rejected = TestingFloor::FClient::Create(Settings(), {}, MakeShared<FRejectingTransport>());
+	Rejected->Track(TEXT("example"));
+	Rejected->Flush();
+	TestFalse(TEXT("A refused key stops collection"), Rejected->IsCollecting());
+	TestEqual(TEXT("Refused key"), Rejected->GetCollectionReason(), FString(TEXT("collector_rejected")));
+	return true;
+}
+
 #endif

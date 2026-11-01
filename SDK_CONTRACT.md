@@ -1,7 +1,8 @@
 # SDK contract
 
 Unity and Unreal share this behavior. Their APIs follow each engine's conventions.
-For setup and code examples, start with the README in the SDK you use.
+For setup and code examples, start with the README in the SDK you use. This file
+is identical in both SDK repositories; change it in both.
 
 ## Field reference
 
@@ -18,6 +19,10 @@ contract is authoritative.
 - One SDK play-session ID per game launch or editor Play run. It changes for the next Play run.
 - A recording UUID identifies a capture that can span several Play runs.
 - `$session_id` is the play-session ID, shown as one run in Testing Floor.
+- The SDK generates a profile ID, sent as `$user_id`, and keeps it with the game's
+  saved data, so it follows the player wherever that data syncs. It also generates
+  an installation ID, sent as `$device_id`, and keeps it on the machine. An ID the
+  game sets replaces the generated one. Each README says where its SDK keeps them.
 - The Player ID shown in Testing Floor is `$user_id`, falling back to `$device_id` when no user ID is present.
 - `$tf.recording_uuid` is the recording UUID.
 - No automatic `session_start`, `session_end`, or `$tf_session_*` events are emitted.
@@ -26,11 +31,12 @@ contract is authoritative.
   Optional fields are `playtest_id`, `suppress_qr` (defaults true), and `created_at_unix_ms`.
 - Editor sidecars are `Library/TestingFloor/recording-payload.json` for Unity and
   `Saved/TestingFloor/recording-payload.json` for Unreal. The recorder owns their lifetime.
-- A versioned editor recording lease sidecar supersedes the launch argument,
-  including when expired, so expiry cannot revive an old launch association.
-  Otherwise a valid launch argument takes precedence over legacy sidecars.
-  Malformed or expired arguments permit sidecar fallback. Timestamped legacy
-  handoffs older than 12 hours are ignored.
+- In the editor, a versioned recording lease sidecar supersedes the launch
+  argument, including when its lease has expired, so expiry cannot revive an old
+  launch association. For legacy sidecars without a lease, Unreal prefers a valid
+  launch argument; the Unity editor prefers the sidecar. Malformed or expired
+  arguments permit sidecar fallback. Timestamped handoffs older than 12 hours are
+  ignored unless they hold a live lease.
 - Old recorder session aliases and `session-payload.json` are not supported.
 
 ## Editor collection policy and dynamic recording
@@ -67,6 +73,9 @@ recording/Play-session pairs never reopen. Local status is written separately
 as `<session-id>.status.json` with recording/session identity, engine/SDK version,
 state, reason, capabilities, sticky interruption and `updated_at_unix_ms`.
 
+The game can read the active recording, get a notification when it changes, and
+ask whether the SDK is collecting, with a machine-readable reason when it is not.
+
 ## Recording delivery completion
 
 The recorder supplies `telemetry_directory` in the recording handoff. It creates
@@ -98,6 +107,13 @@ before an event is queued. Retries preserve that snapshot and event order.
 Call-site properties override shared context. Keep callbacks inexpensive and use
 the game/main thread for SDK calls.
 
+An optional event processor runs last over each tracked event's merged properties:
+context provider values, player and camera values, then call-site properties. It
+can read, change or remove them before the event is queued, for example to
+convert a game's coordinate frame. The `game_level.*` values that object records
+copy come from its result. It also sees `player_moved` and `player_teleported`,
+but not the SDK's `$tf_` records.
+
 Use `game_level.id` for a stable, game-owned level identifier.
 
 Properties accept strings, signed integers, finite floating-point numbers,
@@ -106,9 +122,39 @@ keys, keys beginning with `$`, and nonfinite numbers are omitted. Arrays are
 copied when set. Nested objects and implicit conversion of custom types are not
 supported. Convert enums and other custom values at the call site.
 
+Event names beginning with `$tf_`, in any casing, are reserved for the SDK's own
+records. `Track` refuses them and sends nothing. It logs one warning per name.
+While the SDK is collecting, each refused event counts as dropped in the local
+diagnostics, but not toward a recording's `dropped_events`, and it starts no
+keyframe. The SDK's own records are unaffected.
+
+`$time` and `$sent_at` are ISO 8601 times in UTC with exactly three fractional
+digits and a `Z` suffix, such as `2026-04-19T18:32:00.000Z`.
+
 An accepted `Send` / `Track` result means queued in memory, not acknowledged by
 the server. Event builders are single-use in Unity. Unreal accepts an immutable
 snapshot of typed `FProperties` for each call.
+
+## Record context
+
+Every record carries `$tf`: the SDK version, `engine`, `editor`, `os`, `locale`,
+`app_version`, `device_model`, `screen_width` / `screen_height`, the recording's
+`recording_uuid` and `playtest_id` while one is attached, `seq`, and `keyframe` on
+keyframes.
+
+- `editor` is `true` for Play inside the engine editor, else `false`.
+- `os` is the operating system family: `Windows`, `macOS`, `Linux`, `iOS`,
+  `Android`, `tvOS`, `visionOS`, `Web`, `PlayStation`, `Xbox` or `Switch`. Any
+  other platform sends the engine's platform name.
+- `locale` is a BCP 47 tag such as `en-US`, from the OS or UI culture. When the
+  SDK cannot tell the region it sends a language-only tag such as `en`, and when
+  it cannot tell the language it leaves `locale` out. It never sends a display
+  name such as `English`.
+- `app_version` is the engine's version setting. `device_model` and the screen
+  size are read from the engine. Where an SDK lets the game supply one of these
+  values, the game's value wins.
+- The SDK never sends an empty string or a partial value such as an engine name
+  without its version. It leaves out a key whose value it does not know.
 
 ## Transport and limits
 
@@ -166,8 +212,8 @@ emitting a teleport event.
 
 ## Safe defaults
 
-Collection requires a write key. Editor collection, movement events, and QR
-markers default off. Automated engine tests cannot enable live collection or
+Collection requires a write key. Ordinary editor collection, movement events, and
+QR markers default off. Automated engine tests cannot enable live collection or
 markers, including through a force-QR override. Do not put personal data, write
 keys, or other credentials in event properties or public examples.
 
@@ -184,19 +230,21 @@ Every record is sent with `$schema: 2` and `$tf.seq`: a counter that starts at 1
 ### Session state (`$tf_state`)
 
 - State providers supply values that stay true until they change, such as settings, device, build, inventory and outfit. The existing context provider stays for small values that describe each moment, such as level, health and game clock, and its values are still added to every event.
+- A value set directly with `SetState` accepts the same types as a provider: string, integer, double, boolean, string list and integer list. A direct value replaces the provider's value for the same key.
 - The SDK reads state providers before each event and once a second, in unscaled time, including while gameplay is paused. If a value changed, it queues one `$tf_state` record that holds only the changed keys, before the event. A removed key is sent as `null`.
 - A keyframe repeats every current value and sets `$tf.keyframe: true`. The SDK sends one when the play session starts, when a recording starts, every 5 minutes, and after it drops any record.
-- The SDK moves its own device, engine and build fields, `viewport.width`, `viewport.height` and `camera.fov_axis` into state. Camera pose, `camera.fov` and the player position stay on events.
+- The SDK sends its device, engine and build fields in `$tf` on every record, not as state. State carries `viewport.width`, `viewport.height` and `camera.fov_axis` and the game's state values. Camera pose, `camera.fov` and the player position stay on events.
 - `$tf_state` records carry no context-provider values and no player or camera fields.
 
 ### Tracked objects (`$tf_objects`)
 
 - A game registers an object with a kind, a position source and an optional id. Without an id the SDK assigns `kind#n`, counting per kind for each play session.
+- An object can also be tracked from an engine object, without keeping it alive, or with a no-code tracking component. The SDK removes it as `destroyed` when the engine object is gone and as `disabled` when the component is disabled.
 - The SDK checks live objects 4 times a second (setting: 1–10) in unscaled time. It sends a sample when an object is registered, and after that only when the object has moved at least 0.25 m since its last sent sample.
-- Removing an object sends its final position and a reason. SDK reasons are `destroyed` (the engine object is gone), `gone` (the position source returned nothing) and `disabled` (a tracking component was disabled).
+- Removing an object sends its final position and a reason. SDK reasons are `destroyed` (the engine object is gone), `gone` (the position source returned nothing), `disabled` (a tracking component was disabled) and `removed` (the game removed the object without a reason).
 - Object state values are scalars. Only changed values are sent.
 - Every 5 minutes, and after the SDK drops any record, a keyframe record repeats every live object with its position and full state.
-- A record holds parallel arrays: `sample.id`, `sample.kind`, `sample.x`, `sample.y`, `sample.z`; `removed.id`, `removed.reason`; `state.id`, `state.key`, `state.value`. Positions use native units, rounded to 1 cm. A record holds at most 300 samples; a larger check is split into several records with the same `$time`. Records copy the `game_level.*` values from the most recent event and carry no other context and no player or camera fields. The SDK sends no record when nothing changed.
+- A record holds parallel arrays: `sample.id`, `sample.kind`, `sample.x`, `sample.y`, `sample.z`; `removed.id`, `removed.reason`; `state.id`, `state.key`, `state.value`. Positions use native units, rounded to 1 cm. A record holds at most 300 samples; a larger check is split into several records with the same `$time`. Each check's records get a `$time` later than the previous check's, so readers that order by time keep checks apart. Records copy the `game_level.*` values from the most recent event and carry no other context and no player or camera fields. The SDK sends no record when nothing changed.
 - At most 256 objects are live (setting). Further registrations are ignored, with one warning.
 - With collection disabled, registration returns a handle that does nothing, and nothing is sampled.
 

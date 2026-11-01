@@ -5,9 +5,21 @@
 - Enable editor telemetry only while a live desktop recording is attached, with a separate opt-out and all existing master/configuration/automation gates.
 - Attach to already-running Play, suspend on expired recording leases, renew with fresh state/object keyframes, and record again without restarting Play.
 - Preserve Play identity and immutable event association while isolating recording completion/drop counts.
-- Refuse `Track` event names that begin with `$tf_`, which the telemetry contract reserves for Testing Floor records, with one warning per client. Before, a game event named `$tf_telemetry_complete` was batched as a completion marker and, without a recording, failed a check on flush.
+- Refuse `Track` event names that begin with `$tf_` in any casing, which the telemetry contract reserves for Testing Floor records, with one warning per name. Refusals count in `GetDroppedEventCount` while collecting, but not toward a recording's `dropped_events`. Before, a game event named `$tf_telemetry_complete` was batched as a completion marker and, without a recording, failed a check on flush.
 - Acknowledge SDK participation through local status and preserve interruption evidence in completion markers.
 - Ship an unedited copy of the Testing Floor telemetry contract in `Tests/Contract`. `TestingFloor.Sdk.Contract` automation tests fail when the envelope, `$tf` keys, record names, tracked-object fields, SDK properties or limits differ from it.
+
+### Aligned with the Unity SDK
+
+- Generate a profile ID, sent as `$user_id`, in the `TestingFloorProfile` slot of the platform save system, and an installation ID, sent as `$device_id`, in `Saved/TestingFloorSdk/installation-id`. `FSettings::UserID` and `DeviceID` still override them. Before, events had no Player ID unless the game set one.
+- Fill `$tf.app_version` from the project version, `$tf.device_model` from `FPlatformMisc::GetDeviceMakeAndModel` and `$tf.screen_width` / `screen_height` from the game viewport. Game-supplied values still win.
+- Send `$tf.os` as the OS family (`Windows`, `macOS`, `Linux`, `iOS`, `Android`, `tvOS`, `visionOS`, `PlayStation`, `Xbox`, `Switch`) instead of Unreal's platform name such as `Mac`, and `$tf.locale` as a BCP 47 tag.
+- Add `$tf.editor` to every record: `true` for Play inside the editor.
+- Leave unknown context out instead of sending empty strings, or `engine` as `"Unreal "`, including from the advanced `Create` overload. `ApplyEngineDefaults` fills the same metadata and IDs as the default factory.
+- Track actors and scene components weakly with new `TrackObject` overloads, removing them as `destroyed` once they are gone. Add `UTestingFloorTrackedObjectComponent`, which tracks its owner with no code and removes it as `disabled` or `destroyed`. The default factory makes its client the default for these components; `FClient::SetDefault` sets another.
+- Give each object check a `$time` later than the previous check's.
+- Add `OnRecordingChanged()`, broadcast before the new recording's keyframes, and `IsCollecting()` / `GetCollectionReason()`.
+- `SDK_CONTRACT.md` matches the Unity SDK's copy again, and the vendored telemetry contract declares `$tf.editor`.
 
 ## 0.4.0 — Unreleased
 
