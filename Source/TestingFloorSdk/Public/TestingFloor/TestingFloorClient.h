@@ -130,7 +130,12 @@ struct TESTINGFLOORSDK_API FActivitySample
 	TOptional<FQuat> CameraRotation;
 	/** Optional host coordinate-system override for the serialized camera.euler fields. */
 	TOptional<FVector> CameraEulerDegrees;
+	/** Horizontal field of view of a perspective camera. */
 	TOptional<double> CameraFOV;
+	/** Width of an orthographic camera's view, such as `FMinimalViewInfo::OrthoWidth`. Sent instead of CameraFOV. */
+	TOptional<double> CameraOrthoWidth;
+	/** World point at the center of the view, such as the pivot a strategy or sim camera orbits. */
+	TOptional<FVector> CameraFocus;
 	FIntPoint ViewportSize = FIntPoint::ZeroValue;
 	bool IsEmpty() const;
 };
@@ -148,6 +153,8 @@ struct FMovementSettings
 	double MinStepFOVDegrees = 0.05;
 	double MinPingCameraDistance = 0.5;
 	double MinStepCameraDistance = 0.005;
+	double MinPingOrthoWidth = 0.5;
+	double MinStepOrthoWidth = 0.005;
 };
 
 /** HTTP seam is injectable: automation can exercise the complete queue without sockets. */
@@ -320,7 +327,7 @@ private:
 	bool bRecordingClosed = false;
 	bool bRecordingRegistered = false;
 	void SampleMovement(double NowSeconds, const FActivitySample& Sample);
-	void EmitMovement(const TCHAR* Reason, double Distance, double Duration, double Rotation, double FOV, double CameraDistance);
+	void EmitMovement(const TCHAR* Reason, double Distance, double Duration, double Rotation, double FOV, double CameraDistance, double OrthoWidth);
 	void FillActivityContext(FProperties& Properties, const FActivitySample& Sample) const;
 	/** Capture the record's editor flag and, when no other source gives one, the engine viewport size. */
 	void StampRecord(FEvent& Record) const;
@@ -430,6 +437,8 @@ private:
 	double LastPingSeconds = 0.0;
 	FVector4d RunTotals = FVector4d::Zero();
 	FVector4d PingTotals = FVector4d::Zero();
+	double RunOrthoWidth = 0.0;
+	double PingOrthoWidth = 0.0;
 	struct FTeleport
 	{
 		FString Reason;

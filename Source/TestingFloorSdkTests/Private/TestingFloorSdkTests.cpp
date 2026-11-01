@@ -142,7 +142,7 @@ bool FTestingFloorPayloadTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("64-bit integer keeps exact wire precision"), Transport->Bodies[0].Contains(TEXT("9007199254740993")));
 	const TSharedPtr<FJsonObject>* Metadata = nullptr;
 	TF_REQUIRE_TRUE(Payload->TryGetObjectField(TEXT("$tf"), Metadata) && Metadata && Metadata->IsValid(), "SDK metadata object");
-	TestEqual(TEXT("SDK metadata"), (*Metadata)->GetStringField(TEXT("sdk_version")), FString(TEXT("0.5.0")));
+	TestEqual(TEXT("SDK metadata"), (*Metadata)->GetStringField(TEXT("sdk_version")), FString(TEXT("0.6.0")));
 	return true;
 }
 
@@ -300,6 +300,56 @@ bool FTestingFloorMovementTeleportTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorOrthographicZoomTest, "TestingFloor.Sdk.MovementOrthographicZoom", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorOrthographicZoomTest::RunTest(const FString& Parameters)
+{
+	auto Settings = TestingFloorClientTests::Settings();
+	Settings.bMovementTracking = true;
+	Settings.FlushIntervalSeconds = 1000.0;
+	const auto Client = TestingFloor::FClient::Create(Settings, {}, MakeShared<TestingFloorClientTests::FTransport>());
+	TestingFloor::FActivitySample Sample;
+	Sample.CameraRotation = FRotator(-90.0, 0.0, 0.0).Quaternion();
+	Sample.CameraOrthoWidth = 2000.0;
+	Sample.CameraFOV = 90.0;
+	Client->SetActivitySource([&Sample] { return Sample; });
+	Client->Tick(0.0);
+	// Only the view width changes: 1 m, 1 m, then 2 m. The unused FOV drifts too.
+	Sample.CameraOrthoWidth = 2100.0;
+	Sample.CameraFOV = 95.0;
+	Client->Tick(0.1);
+	Sample.CameraOrthoWidth = 2200.0;
+	Sample.CameraFOV = 100.0;
+	Client->Tick(0.2);
+	Sample.CameraOrthoWidth = 2400.0;
+	Client->Tick(0.8);
+	Client->Tick(1.1);
+	const auto Idle = TestingFloor::FClient::Create(Settings, {}, MakeShared<TestingFloorClientTests::FTransport>());
+	TestingFloor::FActivitySample Still;
+	Still.CameraOrthoWidth = 2000.0;
+	Still.CameraFOV = 90.0;
+	Idle->SetActivitySource([&Still] { return Still; });
+	Idle->Tick(0.0);
+	for (const double Now : { 0.1, 0.2, 0.8, 1.1 })
+	{
+		Still.CameraFOV = Still.CameraFOV.GetValue() + 5.0;
+		Idle->Tick(Now);
+	}
+	TestEqual(TEXT("An orthographic camera's unused FOV is not movement"),
+		Idle->GetQueuedEvents().FilterByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("player_moved"); }).Num(), 0);
+	const auto Moves = Client->GetQueuedEvents().FilterByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("player_moved"); });
+	TF_REQUIRE_TRUE(Moves.Num() == 3, "Zooming alone produces start, ping, stop");
+	const auto Delta = [](const TestingFloor::FEvent& Event)
+	{
+		const TSharedPtr<FJsonValue>* Value = Event.Properties.GetValues().Find(TEXT("movement.ortho_width_delta"));
+		return Value && Value->IsValid() ? (*Value)->AsNumber() : 0.0;
+	};
+	TestEqual(TEXT("Start has no metrics"), Delta(Moves[0]), 0.0);
+	TestEqual(TEXT("Ping reports the zoom since start, in meters"), Delta(Moves[1]), 2.0);
+	TestEqual(TEXT("Stop reports the whole run's zoom"), Delta(Moves[2]), 4.0);
+	TestFalse(TEXT("Zooming is not a field-of-view change"), Moves[1].Properties.GetValues().Contains(TEXT("movement.fov_delta")));
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorRecordingTest, "TestingFloor.Sdk.PlaySessionAndShutdown", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorRecordingTest::RunTest(const FString& Parameters)

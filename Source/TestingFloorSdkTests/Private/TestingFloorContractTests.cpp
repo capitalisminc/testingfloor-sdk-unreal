@@ -324,7 +324,7 @@ FRecordedRun RunRecording()
 	return Run;
 }
 
-/** A run that sends every SDK-owned property: pose on events, viewport and FOV axis in state, movement and a teleport. */
+/** Runs that send every SDK-owned property: pose on events, viewport, projection and FOV axis in state, movement and a teleport, then an orthographic camera. */
 TArray<TSharedPtr<FJsonObject>> RunActivity()
 {
 	auto RunSettings = Settings();
@@ -357,6 +357,25 @@ TArray<TSharedPtr<FJsonObject>> RunActivity()
 		Client->Tick(0.8);
 		Client->Tick(1.2);
 		Client->RecordTeleport(FVector::ZeroVector, FVector(1000.0, 0.0, 0.0), TEXT("respawn"), 1.5);
+		Client->Flush();
+	}
+	{
+		// An orthographic camera sends its view width instead of a FOV, and zooming is movement.
+		const auto Client = TestingFloor::FClient::Create(RunSettings, {}, Transport);
+		TestingFloor::FActivitySample Sample;
+		Sample.CameraPosition = FVector(0.0, 0.0, 1000.0);
+		Sample.CameraRotation = FRotator(-60.0, 0.0, 0.0).Quaternion();
+		Sample.CameraOrthoWidth = 2000.0;
+		Sample.CameraFocus = FVector::ZeroVector;
+		Sample.ViewportSize = FIntPoint(1920, 1080);
+		Client->SetActivitySource([&Sample] { return Sample; });
+		Client->Tick(0.0);
+		for (const double Now : { 0.1, 0.2, 0.8 })
+		{
+			Sample.CameraOrthoWidth = Sample.CameraOrthoWidth.GetValue() + 100.0;
+			Client->Tick(Now);
+		}
+		Client->Tick(1.2);
 		Client->Flush();
 	}
 	return Sent(*Transport);

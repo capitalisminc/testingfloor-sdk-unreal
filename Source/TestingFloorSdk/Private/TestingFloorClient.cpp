@@ -158,7 +158,9 @@ FVector4d ActivityStep(const FActivitySample& Current, const FActivitySample& Pr
 	const double Rotation = Current.CameraRotation.IsSet() && Previous.CameraRotation.IsSet()
 		? FMath::RadiansToDegrees(Current.CameraRotation.GetValue().AngularDistance(Previous.CameraRotation.GetValue()))
 		: 0.0;
-	const double FOV = Current.CameraFOV.IsSet() && Previous.CameraFOV.IsSet()
+	// An orthographic camera ignores its field of view, as serialization does.
+	const bool bOrthographic = Current.CameraOrthoWidth.IsSet() || Previous.CameraOrthoWidth.IsSet();
+	const double FOV = !bOrthographic && Current.CameraFOV.IsSet() && Previous.CameraFOV.IsSet()
 		? FMath::Abs(Current.CameraFOV.GetValue() - Previous.CameraFOV.GetValue())
 		: 0.0;
 	return FVector4d(
@@ -166,6 +168,15 @@ FVector4d ActivityStep(const FActivitySample& Current, const FActivitySample& Pr
 		Rotation > 0.0 && Rotation >= Settings.MinStepRotationDegrees ? Rotation : 0.0,
 		FOV > 0.0 && FOV >= Settings.MinStepFOVDegrees ? FOV : 0.0,
 		CameraDistance > 0.0 && CameraDistance >= Settings.MinStepCameraDistance ? CameraDistance : 0.0);
+}
+
+/** Change in an orthographic camera's view width, in meters. */
+double OrthoWidthStep(const FActivitySample& Current, const FActivitySample& Previous, const FMovementSettings& Settings)
+{
+	const double Step = Current.CameraOrthoWidth.IsSet() && Previous.CameraOrthoWidth.IsSet()
+		? FMath::Abs(Current.CameraOrthoWidth.GetValue() - Previous.CameraOrthoWidth.GetValue()) / 100.0
+		: 0.0;
+	return Step > 0.0 && Step >= Settings.MinStepOrthoWidth ? Step : 0.0;
 }
 
 bool SameValue(const TSharedPtr<FJsonValue>& Left, const TSharedPtr<FJsonValue>& Right)
@@ -545,7 +556,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 	Private::SetIfPresent(*Object, TEXT("$device_id"), Settings.DeviceID);
 	Private::SetIfPresent(*Object, TEXT("$user_id"), Settings.UserID);
 	const TSharedRef<FJsonObject> Platform = MakeShared<FJsonObject>();
-	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.5.0"));
+	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.6.0"));
 	if (Event.Sequence > 0)
 	{
 		Platform->SetField(TEXT("seq"), MakeShared<FJsonValueNumberString>(LexToString(Event.Sequence)));
@@ -798,7 +809,8 @@ FString LoadOrCreateInstallationID(const FString& InPath)
 
 bool FActivitySample::IsEmpty() const
 {
-	return !PlayerPosition.IsSet() && !CameraPosition.IsSet() && !CameraRotation.IsSet() && !CameraFOV.IsSet();
+	return !PlayerPosition.IsSet() && !CameraPosition.IsSet() && !CameraRotation.IsSet() && !CameraFOV.IsSet()
+		&& !CameraOrthoWidth.IsSet() && !CameraFocus.IsSet();
 }
 
 TSharedRef<FClient> FClient::Create(FSettings Settings)
@@ -923,6 +935,8 @@ void FClient::SetMovementSettings(const FMovementSettings& InSettings)
 	MovementSettings.MinStepFOVDegrees = Private::MovementThreshold(InSettings.MinStepFOVDegrees);
 	MovementSettings.MinPingCameraDistance = Private::MovementThreshold(InSettings.MinPingCameraDistance);
 	MovementSettings.MinStepCameraDistance = Private::MovementThreshold(InSettings.MinStepCameraDistance);
+	MovementSettings.MinPingOrthoWidth = Private::MovementThreshold(InSettings.MinPingOrthoWidth);
+	MovementSettings.MinStepOrthoWidth = Private::MovementThreshold(InSettings.MinStepOrthoWidth);
 	ResetMovement();
 }
 
@@ -957,8 +971,17 @@ void FClient::FillActivityContext(FProperties& Properties, const FActivitySample
 	if (Sample.CameraRotation.IsSet())
 	{
 		Properties.SetVector(TEXT("camera.forward"), Sample.CameraRotation.GetValue().GetForwardVector());
+		Properties.SetVector(TEXT("camera.up"), Sample.CameraRotation.GetValue().GetUpVector());
 	}
-	if (Sample.CameraFOV.IsSet())
+	if (Sample.CameraFocus.IsSet())
+	{
+		Properties.SetVector(TEXT("camera.focus"), Sample.CameraFocus.GetValue());
+	}
+	if (Sample.CameraOrthoWidth.IsSet())
+	{
+		Properties.Set(TEXT("camera.ortho_width"), Sample.CameraOrthoWidth.GetValue());
+	}
+	else if (Sample.CameraFOV.IsSet())
 	{
 		Properties.Set(TEXT("camera.fov"), Sample.CameraFOV.GetValue());
 	}
@@ -1104,9 +1127,13 @@ void FClient::CountDroppedRecords(TConstArrayView<FEvent> Records)
 bool FClient::PollState(FDateTime Timestamp, const FActivitySample* Sample)
 {
 	FProperties Current;
-	if (Sample && Sample->CameraFOV.IsSet())
+	if (Sample && Sample->CameraOrthoWidth.IsSet())
 	{
-		Current.Set(TEXT("camera.fov_axis"), TEXT("horizontal"));
+		Current.Set(TEXT("camera.projection"), TEXT("orthographic"));
+	}
+	else if (Sample && Sample->CameraFOV.IsSet())
+	{
+		Current.Set(TEXT("camera.projection"), TEXT("perspective")).Set(TEXT("camera.fov_axis"), TEXT("horizontal"));
 	}
 	if (Sample && Sample->ViewportSize.X > 0 && Sample->ViewportSize.Y > 0)
 	{
@@ -1250,7 +1277,7 @@ void FClient::WriteRecordingStatus(const FRecordingContext& Recording, const TCH
 	Value->SetStringField(TEXT("recording_uuid"), Recording.RecordingUUID);
 	Value->SetStringField(TEXT("session_id"), SessionID);
 	Value->SetStringField(TEXT("engine"), TEXT("unreal"));
-	Value->SetStringField(TEXT("sdk_version"), TEXT("0.5.0"));
+	Value->SetStringField(TEXT("sdk_version"), TEXT("0.6.0"));
 	Value->SetStringField(TEXT("state"), Status);
 	Value->SetStringField(TEXT("reason"), Reason);
 	Value->SetBoolField(TEXT("interrupted"), bRecordingInterrupted);
@@ -1618,6 +1645,8 @@ void FClient::ResetMovement()
 	MovementStartSeconds = -1.0;
 	RunTotals = FVector4d::Zero();
 	PingTotals = FVector4d::Zero();
+	RunOrthoWidth = 0.0;
+	PingOrthoWidth = 0.0;
 }
 
 void FClient::SampleMovement(double NowSeconds, const FActivitySample& Sample)
@@ -1634,12 +1663,15 @@ void FClient::SampleMovement(double NowSeconds, const FActivitySample& Sample)
 		return;
 	}
 	const FVector4d Step = Private::ActivityStep(Sample, LastSample.GetValue(), MovementSettings);
+	const double OrthoWidth = Private::OrthoWidthStep(Sample, LastSample.GetValue(), MovementSettings);
 	LastSample = Sample;
-	const bool bMoved = Step.X > 0.0 || Step.Y > 0.0 || Step.Z > 0.0 || Step.W > 0.0;
+	const bool bMoved = Step.X > 0.0 || Step.Y > 0.0 || Step.Z > 0.0 || Step.W > 0.0 || OrthoWidth > 0.0;
 	if (bMoved)
 	{
 		RunTotals += Step;
 		PingTotals += Step;
+		RunOrthoWidth += OrthoWidth;
+		PingOrthoWidth += OrthoWidth;
 		LastMovementSeconds = NowSeconds;
 		if (!bMoving)
 		{
@@ -1654,7 +1686,8 @@ void FClient::SampleMovement(double NowSeconds, const FActivitySample& Sample)
 				MovementStartSeconds = -1.0;
 				LastPingSeconds = NowSeconds;
 				PingTotals = FVector4d::Zero();
-				EmitMovement(TEXT("start"), 0.0, 0.0, 0.0, 0.0, 0.0);
+				PingOrthoWidth = 0.0;
+				EmitMovement(TEXT("start"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 			}
 		}
 	}
@@ -1664,23 +1697,27 @@ void FClient::SampleMovement(double NowSeconds, const FActivitySample& Sample)
 	}
 	if (bMoving && NowSeconds - LastMovementSeconds >= FMath::Max(0.0, MovementSettings.StopGraceSeconds))
 	{
-		EmitMovement(TEXT("stop"), RunTotals.X, NowSeconds - RunStartSeconds, RunTotals.Y, RunTotals.Z, RunTotals.W);
+		EmitMovement(TEXT("stop"), RunTotals.X, NowSeconds - RunStartSeconds, RunTotals.Y, RunTotals.Z, RunTotals.W, RunOrthoWidth);
 		bMoving = false;
 		MovementStartSeconds = -1.0;
 		RunTotals = FVector4d::Zero();
 		PingTotals = FVector4d::Zero();
+		RunOrthoWidth = 0.0;
+		PingOrthoWidth = 0.0;
 	}
 	if (bMoving && NowSeconds - LastPingSeconds >= FMath::Max(0.0, MovementSettings.MinPingIntervalSeconds)
 		&& (PingTotals.X >= MovementSettings.MinPingDistance || PingTotals.Y >= MovementSettings.MinPingRotationDegrees
-			|| PingTotals.Z >= MovementSettings.MinPingFOVDegrees || PingTotals.W >= MovementSettings.MinPingCameraDistance))
+			|| PingTotals.Z >= MovementSettings.MinPingFOVDegrees || PingTotals.W >= MovementSettings.MinPingCameraDistance
+			|| PingOrthoWidth >= MovementSettings.MinPingOrthoWidth))
 	{
-		EmitMovement(TEXT("ping"), PingTotals.X, NowSeconds - LastPingSeconds, PingTotals.Y, PingTotals.Z, PingTotals.W);
+		EmitMovement(TEXT("ping"), PingTotals.X, NowSeconds - LastPingSeconds, PingTotals.Y, PingTotals.Z, PingTotals.W, PingOrthoWidth);
 		PingTotals = FVector4d::Zero();
+		PingOrthoWidth = 0.0;
 		LastPingSeconds = NowSeconds;
 	}
 }
 
-void FClient::EmitMovement(const TCHAR* Reason, double Distance, double Duration, double Rotation, double FOV, double CameraDistance)
+void FClient::EmitMovement(const TCHAR* Reason, double Distance, double Duration, double Rotation, double FOV, double CameraDistance, double OrthoWidth)
 {
 	FProperties Properties;
 	Properties.Set(TEXT("movement.reason"), Reason);
@@ -1694,6 +1731,8 @@ void FClient::EmitMovement(const TCHAR* Reason, double Distance, double Duration
 		Properties.Set(TEXT("movement.fov_delta"), FOV);
 	if (CameraDistance > 0.0)
 		Properties.Set(TEXT("movement.camera_distance"), CameraDistance);
+	if (OrthoWidth > 0.0)
+		Properties.Set(TEXT("movement.ortho_width_delta"), OrthoWidth);
 	Track(TEXT("player_moved"), Properties);
 }
 

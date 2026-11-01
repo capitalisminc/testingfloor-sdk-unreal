@@ -198,8 +198,8 @@ provider's value for the same key and accept the same types as `FProperties`.
 
 A keyframe repeats every current value. The SDK sends one at the start of the
 play session, every recording attachment or renewal, every 5 minutes, and
-after it drops any record. The SDK's own `viewport.width`, `viewport.height` and
-`camera.fov_axis` are state. Testing Floor shows each event with the state that
+after it drops any record. The SDK's own `viewport.width`, `viewport.height`,
+`camera.projection` and `camera.fov_axis` are state. Testing Floor shows each event with the state that
 was current at that moment. A game without a state provider keeps all of its
 context on every event.
 
@@ -265,10 +265,39 @@ Client->SetActivitySource([] {
 
 Replace the example values with current game state; leave optional samples unset
 when unavailable. Every event carries the available `player.position.*`,
-`camera.position.*`, `camera.euler.*`, `camera.forward.*`, and `camera.fov`
-fields. FOV is horizontal: `camera.fov_axis=horizontal` and `viewport.width` /
-`viewport.height` are session state. `CameraEulerDegrees` can override
-quaternion-derived Euler values.
+`camera.position.*`, `camera.euler.*`, `camera.forward.*`, `camera.up.*` and
+`camera.fov` fields. FOV is horizontal: `camera.projection=perspective`,
+`camera.fov_axis=horizontal` and `viewport.width` / `viewport.height` are
+session state. `CameraEulerDegrees` can override quaternion-derived Euler values.
+
+### Orthographic, strategy and sim cameras
+
+For an orthographic camera, set `CameraOrthoWidth` to the view's width, such as
+`FMinimalViewInfo::OrthoWidth`, instead of `CameraFOV`. Events then carry
+`camera.ortho_width` instead of `camera.fov`, and `camera.projection` is
+`orthographic`. If the camera orbits or follows a point, such as the pivot of a
+strategy or sim camera, set `CameraFocus` to that point. Testing Floor centers
+the camera's view on the map there:
+
+```cpp
+Client->SetActivitySource([this] {
+    const FMinimalViewInfo View = PlayerCameraManager->GetCameraCacheView();
+    TestingFloor::FActivitySample Sample;
+    Sample.CameraPosition = View.Location;
+    Sample.CameraRotation = View.Rotation.Quaternion();
+    if (View.ProjectionMode == ECameraProjectionMode::Orthographic)
+        Sample.CameraOrthoWidth = View.OrthoWidth;
+    else
+        Sample.CameraFOV = View.FOV;
+    Sample.CameraFocus = CameraPivot->GetComponentLocation();
+    Sample.ViewportSize = FIntPoint(1920, 1080);
+    return Sample;
+});
+```
+
+`PlayerPosition` is the character the player plays. If the player directs many
+characters instead, leave it unset rather than following a selected one, and
+track each character with `TrackObject`.
 
 Positions and teleport endpoints use native Unreal centimeters. Movement
 thresholds and scalar movement/teleport distances use meters; angles use degrees.
@@ -284,9 +313,10 @@ Client->SetMovementTrackingEnabled(true);
 ```
 
 `player_moved` reports `movement.reason` as `start`, `ping`, or `stop`. Movement
-includes camera position, rotation, and FOV activity. Nonzero metrics include
-`movement.distance`, `movement.camera_distance`, `movement.rotation_degrees`,
-`movement.fov_delta`, and `movement.duration`. Ping metrics cover the segment
+includes camera position, rotation, FOV and orthographic width activity. Nonzero
+metrics include `movement.distance`, `movement.camera_distance`,
+`movement.rotation_degrees`, `movement.fov_delta`, `movement.ortho_width_delta`,
+and `movement.duration`. Ping metrics cover the segment
 since the previous ping; stop metrics cover the full movement run.
 
 Defaults target about two path samples per second. Tune `FMovementSettings` with
