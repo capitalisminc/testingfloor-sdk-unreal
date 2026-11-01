@@ -3,6 +3,7 @@ README.md
 LICENSE.md
 CHANGELOG.md
 ThirdPartyNotices.md
+Config/FilterPlugin.ini
 Source/TestingFloorSdk/Private/TestingFloorClient.cpp
 Source/TestingFloorSdk/Private/TestingFloorHttpTransport.cpp
 Source/TestingFloorSdk/Private/TestingFloorQr.cpp
@@ -13,6 +14,7 @@ Source/TestingFloorSdk/Private/ThirdParty/QrCodeGenerator/qrcodegen.h
 Source/TestingFloorSdk/Public/TestingFloor/TestingFloorClient.h
 Source/TestingFloorSdk/Public/TestingFloor/TestingFloorQr.h
 Source/TestingFloorSdk/TestingFloorSdk.Build.cs
+Source/TestingFloorSdkTests/Private/TestingFloorContractTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorQrTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorRecordingTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorSchemaTests.cpp
@@ -23,3 +25,5 @@ Source/TestingFloorSdkTests/TestingFloorSdkTests.Build.cs
 CONTRIBUTING.md
 AGENTS.md
 SDK_CONTRACT.md
+Tests/Contract/README.md
+Tests/Contract/telemetry_contract.json

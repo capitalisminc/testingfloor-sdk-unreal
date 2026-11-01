@@ -9,6 +9,12 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = "release-files.txt"
+METADATA = {
+    "TestingFloor.uplugin", "README.md", "LICENSE.md", "CHANGELOG.md", "ThirdPartyNotices.md", "CONTRIBUTING.md", "AGENTS.md", "SDK_CONTRACT.md"
+}
+# The automation tests read the telemetry contract, so it ships with them and with BuildPlugin packages.
+CONTRACT = "Tests/Contract/telemetry_contract.json"
+TEST_FILES = {CONTRACT, "Tests/Contract/README.md", "Config/FilterPlugin.ini"}
 VENDOR = "Source/TestingFloorSdk/Private/ThirdParty/QrCodeGenerator/"
 VENDOR_HASHES = {
     "qrcodegen.c": "300eff07ee25baaa7578f20284411638154716379437391e7e689c0e6ce81403",
@@ -36,9 +42,7 @@ def release_files(root=ROOT):
             raise ValueError(f"Invalid release path: {entry}")
         if any(part.startswith(".") for part in path.parts):
             raise ValueError(f"Hidden files cannot be distributed: {entry}")
-        if path.parts[0] != "Source" and entry not in {
-            "TestingFloor.uplugin", "README.md", "LICENSE.md", "CHANGELOG.md", "ThirdPartyNotices.md", "CONTRIBUTING.md", "AGENTS.md", "SDK_CONTRACT.md"
-        }:
+        if path.parts[0] != "Source" and entry not in METADATA | TEST_FILES:
             raise ValueError(f"Unexpected release file: {entry}")
         if path.parts[0] == "Source" and path.suffix not in {".cpp", ".h", ".c", ".cs", ".md"}:
             raise ValueError(f"Unexpected source extension: {entry}")
@@ -54,10 +58,15 @@ def release_files(root=ROOT):
 
 def validate(root=ROOT):
     files = release_files(root)
-    required = {"TestingFloor.uplugin", "README.md", "LICENSE.md", "CHANGELOG.md", "ThirdPartyNotices.md", "CONTRIBUTING.md", "AGENTS.md", "SDK_CONTRACT.md"}
     included = {file.relative_to(root).as_posix() for file in files}
-    if not required.issubset(included):
+    if not METADATA.issubset(included):
         raise ValueError("Release manifest omits required metadata or licenses")
+    if not TEST_FILES.issubset(included):
+        raise ValueError("Release manifest omits the telemetry contract the SDK tests read")
+    try:
+        json.loads((root / CONTRACT).read_text(encoding="utf-8"))
+    except ValueError as error:
+        raise ValueError(f"Telemetry contract is not valid JSON: {error}") from error
     source_files = {p.relative_to(root).as_posix() for p in (root / "Source").rglob("*") if p.is_file()}
     if source_files != {entry for entry in included if entry.startswith("Source/")}:
         raise ValueError("Source tree and release manifest disagree")
