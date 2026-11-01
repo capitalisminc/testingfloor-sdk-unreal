@@ -31,12 +31,11 @@ contract is authoritative.
   Optional fields are `playtest_id`, `suppress_qr` (defaults true), and `created_at_unix_ms`.
 - Editor sidecars are `Library/TestingFloor/recording-payload.json` for Unity and
   `Saved/TestingFloor/recording-payload.json` for Unreal. The recorder owns their lifetime.
-- In the editor, a versioned recording lease sidecar supersedes the launch
-  argument, including when its lease has expired, so expiry cannot revive an old
-  launch association. For legacy sidecars without a lease, Unreal prefers a valid
-  launch argument; the Unity editor prefers the sidecar. Malformed or expired
-  arguments permit sidecar fallback. Timestamped handoffs older than 12 hours are
-  ignored unless they hold a live lease.
+- A versioned recording lease sidecar supersedes the launch argument, including
+  when its lease has expired, so expiry cannot revive an old launch association.
+  Otherwise a valid launch argument takes precedence over a legacy sidecar.
+  Malformed or expired arguments permit sidecar fallback. Timestamped handoffs
+  older than 12 hours are ignored unless they hold a live lease.
 - Old recorder session aliases and `session-payload.json` are not supported.
 
 ## Editor collection policy and dynamic recording
