@@ -13,6 +13,9 @@
 #include "SaveGameSystem.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#if PLATFORM_MAC || PLATFORM_LINUX
+#include <sys/stat.h>
+#endif
 
 namespace TestingFloorEngineContextTests
 {
@@ -168,6 +171,33 @@ bool FTestingFloorIdentityTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("The profile ID is in the game's save data"), SaveGames->DoesSaveGameExist(*Slot, 0));
 	TestEqual(TEXT("The profile ID persists"), TestingFloor::LoadOrCreateProfileID(Slot), Profile);
 	TestNotEqual(TEXT("Profile and installation IDs differ"), Profile, Installation);
+#if PLATFORM_MAC || PLATFORM_LINUX
+	// A stored ID that cannot be read is left in place: that run sends none rather than a new one.
+	const auto Unreadable = [](const FString& File, bool bReadable) {
+		return chmod(TCHAR_TO_UTF8(*FPaths::ConvertRelativePathToFull(File)), bReadable ? 0644 : 0) == 0;
+	};
+	const auto Stored = [](const FString& File) {
+		FString Value;
+		FFileHelper::LoadFileToString(Value, *File);
+		return Value.TrimStartAndEnd();
+	};
+	TF_REQUIRE_TRUE(Unreadable(Path, false), "Make the installation ID unreadable");
+	AddExpectedMessage(TEXT("could not read its installation ID"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	TestEqual(TEXT("An unreadable installation ID sends none"), TestingFloor::LoadOrCreateInstallationID(Path), FString());
+	Unreadable(Path, true);
+	TestEqual(TEXT("The unreadable installation ID is kept"), Stored(Path), Replaced);
+	const FString SlotFile = FPaths::ProjectSavedDir() / TEXT("SaveGames") / Slot + TEXT(".sav");
+	if (IFileManager::Get().FileExists(*SlotFile))
+	{
+		TF_REQUIRE_TRUE(Unreadable(SlotFile, false), "Make the profile slot unreadable");
+		AddExpectedMessage(TEXT("could not read its profile ID"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+		// The platform save system reports the failed read itself.
+		AddExpectedMessage(TEXT("Failed to read file"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+		TestEqual(TEXT("An unreadable profile slot sends none"), TestingFloor::LoadOrCreateProfileID(Slot), FString());
+		Unreadable(SlotFile, true);
+		TestEqual(TEXT("The unreadable profile ID is kept"), Stored(SlotFile), Profile);
+	}
+#endif
 	SaveGames->DeleteGame(false, *Slot, 0);
 	IFileManager::Get().DeleteDirectory(*Directory, false, true);
 	return true;

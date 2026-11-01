@@ -63,7 +63,8 @@ as the Player ID and falls back to `$device_id` when it is missing.
   which stays on this machine.
 
 Set `FSettings::UserID` or `FSettings::DeviceID` to send your own IDs instead. No
-ID is created while `bEnabled` is false or automation tests run. The SDK generates
+ID is created while `bEnabled` is false or automation tests run. If a stored ID
+cannot be read, that run sends none, and the stored ID is left in place. The SDK generates
 a fresh `GetPlaySessionID()` for every client. No synthetic session bookend
 events are emitted.
 

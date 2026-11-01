@@ -741,9 +741,15 @@ FString LoadOrCreateProfileID(const FString& SlotName)
 	{
 		return {};
 	}
-	TArray<uint8> Data;
-	if (SaveGames->DoesSaveGameExist(*SlotName, 0) && SaveGames->LoadGame(false, *SlotName, 0, Data))
+	if (SaveGames->DoesSaveGameExist(*SlotName, 0))
 	{
+		TArray<uint8> Data;
+		if (!SaveGames->LoadGame(false, *SlotName, 0, Data))
+		{
+			// A failed read must not replace the player's ID: this run goes without it.
+			UE_LOG(LogTestingFloor, Warning, TEXT("Testing Floor could not read its profile ID from save slot %s; events are sent without $user_id."), *SlotName);
+			return {};
+		}
 		FString Existing;
 		FFileHelper::BufferToString(Existing, Data.GetData(), Data.Num());
 		Existing.TrimStartAndEndInline();
@@ -765,9 +771,15 @@ FString LoadOrCreateProfileID(const FString& SlotName)
 FString LoadOrCreateInstallationID(const FString& InPath)
 {
 	const FString Path = InPath.IsEmpty() ? FPaths::ProjectSavedDir() / TEXT("TestingFloorSdk/installation-id") : InPath;
-	FString Existing;
-	if (FFileHelper::LoadFileToString(Existing, *Path))
+	if (IFileManager::Get().FileExists(*Path))
 	{
+		FString Existing;
+		if (!FFileHelper::LoadFileToString(Existing, *Path))
+		{
+			// A failed read must not replace the installation's ID: this run goes without it.
+			UE_LOG(LogTestingFloor, Warning, TEXT("Testing Floor could not read its installation ID at %s; events are sent without $device_id."), *Path);
+			return {};
+		}
 		Existing.TrimStartAndEndInline();
 		if (Private::IsUsableID(Existing))
 		{
