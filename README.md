@@ -117,11 +117,13 @@ Client->Track(TEXT("weapon_fire"), TestingFloor::FProperties()
 ```
 
 `Track` returns whether the event entered the queue, not whether it reached the
-server. Properties support strings, GUIDs, booleans, signed 32/64-bit integers,
-finite floats/doubles, string arrays, and integer arrays. `SetIfPresent` omits
-empty or whitespace-only strings. `SetVector` flattens vectors into `.x`, `.y`,
-and `.z` properties. Nested objects are not supported. Keys beginning with `$`
-are reserved.
+server. Event names beginning with `$tf_` are reserved for Testing Floor
+records, so `Track` refuses them and logs one warning. Properties support
+strings, GUIDs, booleans, signed 32/64-bit integers, finite floats/doubles,
+string arrays, and integer arrays. `SetIfPresent` omits empty or
+whitespace-only strings. `SetVector` flattens vectors into `.x`, `.y`, and `.z`
+properties. Nested objects are not supported. Keys beginning with `$` are
+reserved.
 
 Add small values that describe each moment, such as level, health and game
 clock, to every event:
