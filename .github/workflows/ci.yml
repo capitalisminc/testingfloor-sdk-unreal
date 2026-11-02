@@ -17,6 +17,8 @@ jobs:
           python-version: '3.9'
       - name: Check source release
         run: python3 scripts/check_release.py
+      - name: Check the SDK contract copy
+        run: python3 scripts/update_contract.py --check
       - name: Test release boundaries
         run: python3 -m unittest discover -s Tests/Release -v
       - name: Compile vendored QR encoder

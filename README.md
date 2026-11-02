@@ -400,10 +400,13 @@ nor recorder process control.
 
 ## Development
 
-See [SDK_CONTRACT.md](SDK_CONTRACT.md) for the contract shared with the
+See [Tests/Contract/SDK_CONTRACT.md](Tests/Contract/SDK_CONTRACT.md) for the
+behavior every Testing Floor SDK shares, such as the
 [Unity SDK](https://github.com/capitalisminc/testingfloor-sdk-unity). Wire field
 names, types and limits are in the Testing Floor telemetry contract,
 [Tests/Contract/telemetry_contract.json](Tests/Contract/telemetry_contract.json).
+Both are copies of the published
+[SDK contract](https://github.com/capitalisminc/testingfloor-sdk-contract).
 See [CONTRIBUTING.md](CONTRIBUTING.md) for release checks, Unreal automation tests,
 and source packaging.
 

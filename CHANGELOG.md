@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Treat a recording lease as live only when it requests telemetry, names a telemetry directory and expires no more than 30 seconds ahead, as `SDK_CONTRACT.md` and the Unity SDK do. Before, a lease without either field, or one expiring further ahead, kept a handoff older than 12 hours attached and could permit recording-only editor collection. The desktop app's leases always carry both fields and expire 5 seconds ahead, so its recordings are unaffected.
+- Run the shared SDK scenarios in `Tests/Contract/scenarios` as `TestingFloor.Sdk.Scenarios` automation tests, one per file. `Tests/Contract` now holds the whole published SDK contract, including `SDK_CONTRACT.md`, and `scripts/update_contract.py` refreshes it.
+
 ## 0.6.0 — 2026-11-01
 
 The first tagged release. It also contains the changes listed under 0.5.0, 0.4.0, 0.3.0 and 0.2.0, which were never tagged.

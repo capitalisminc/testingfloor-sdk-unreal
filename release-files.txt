@@ -21,6 +21,7 @@ Source/TestingFloorSdkTests/Private/TestingFloorEngineContextTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorObjectLifetimeTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorQrTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorRecordingTests.cpp
+Source/TestingFloorSdkTests/Private/TestingFloorScenarioTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorSchemaTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorSdkTests.cpp
 Source/TestingFloorSdkTests/Private/TestingFloorSdkTestsModule.cpp
@@ -28,6 +29,13 @@ Source/TestingFloorSdkTests/Private/TestingFloorTestHelpers.h
 Source/TestingFloorSdkTests/TestingFloorSdkTests.Build.cs
 CONTRIBUTING.md
 AGENTS.md
-SDK_CONTRACT.md
+Tests/Contract/LICENSE.md
 Tests/Contract/README.md
+Tests/Contract/SDK_CONTRACT.md
+Tests/Contract/scenarios/README.md
+Tests/Contract/scenarios/completion_after_retry.json
+Tests/Contract/scenarios/dropped_events.json
+Tests/Contract/scenarios/handoff.json
+Tests/Contract/scenarios/lease_expiry_and_renewal.json
+Tests/Contract/scenarios/unregistered_run.json
 Tests/Contract/telemetry_contract.json

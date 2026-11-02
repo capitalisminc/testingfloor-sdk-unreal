@@ -50,7 +50,9 @@ struct TESTINGFLOORSDK_API FRecordingContext
 	int64 EditorProcessID = 0;
 	int64 LeaseExpiresAtUnixMilliseconds = 0;
 	bool bTelemetryRequested = false;
+	/** `lease_version` 1 that expires after Now and no more than 30 seconds later: a capture is running. */
 	bool HasLiveLease(FDateTime Now) const;
+	/** A live lease that also requests telemetry and names a telemetry directory, as recording-only collection needs. */
 	bool HasActiveLease(FDateTime Now) const;
 	/** Read the current launch argument or Saved/TestingFloor/recording-payload.json. */
 	static TOptional<FRecordingContext> Discover(FDateTime Now = FDateTime::UtcNow());

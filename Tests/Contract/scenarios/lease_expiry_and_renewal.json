@@ -1,0 +1,54 @@
+{
+  "format": 1,
+  "kind": "lifecycle",
+  "summary": "In the editor, an expired lease suspends collection without completing the recording; a renewal resumes it, and the final marker reports the interruption.",
+  "covers": ["Editor collection policy and dynamic recording", "Recording delivery completion"],
+  "clock_start_unix_ms": 1767225600000,
+  "environment": "editor",
+  "collector": "accept",
+  "steps": [
+    { "start": {} },
+    { "check": { "collecting": false, "recording_uuid": null } },
+    { "track": "before_recording", "accepted": false },
+    {
+      "handoff": {
+        "recording_uuid": "example-recording",
+        "telemetry_directory": "{telemetry_directory}",
+        "lease_version": 1,
+        "telemetry_requested": true,
+        "lease_expires_at_unix_ms": 1767225605000
+      }
+    },
+    { "advance_ms": 250 },
+    { "poll": {} },
+    { "check": { "collecting": true, "recording_uuid": "example-recording", "files_exist": ["{play_session_id}.session"] } },
+    { "track": "during_recording", "accepted": true },
+    { "advance_ms": 6000 },
+    { "poll": {} },
+    { "check": { "collecting": false, "recording_uuid": null } },
+    { "track": "after_expiry", "accepted": false },
+    {
+      "handoff": {
+        "recording_uuid": "example-recording",
+        "telemetry_directory": "{telemetry_directory}",
+        "lease_version": 1,
+        "telemetry_requested": true,
+        "lease_expires_at_unix_ms": 1767225611500
+      }
+    },
+    { "advance_ms": 250 },
+    { "poll": {} },
+    { "check": { "collecting": true, "recording_uuid": "example-recording" } },
+    { "create_file": "closed.json" },
+    { "advance_ms": 250 },
+    { "poll": {} },
+    { "check": { "collecting": false, "recording_uuid": null, "status": { "interrupted": true } } },
+    { "shutdown": {} }
+  ],
+  "expect": {
+    "events": [
+      { "$name": "during_recording", "$tf": { "recording_uuid": "example-recording" } },
+      { "$name": "$tf_telemetry_complete", "interrupted": true, "$tf": { "recording_uuid": "example-recording" } }
+    ]
+  }
+}

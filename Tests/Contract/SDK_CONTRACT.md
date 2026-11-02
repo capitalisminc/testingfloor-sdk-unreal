@@ -1,8 +1,10 @@
 # SDK contract
 
-Unity and Unreal share this behavior. Their APIs follow each engine's conventions.
-For setup and code examples, start with the README in the SDK you use. This file
-is identical in both SDK repositories; change it in both.
+Every Testing Floor SDK shares this behavior. Each SDK's API follows its engine's
+conventions. For setup and code examples, start with the README in the SDK you use.
+The files in [scenarios](scenarios/README.md) check these rules; every SDK runs
+them in its own tests. Each SDK keeps an unedited copy of this file, the
+scenarios and the field reference.
 
 ## Field reference
 
@@ -36,6 +38,11 @@ contract is authoritative.
   Otherwise a valid launch argument takes precedence over a legacy sidecar.
   Malformed or expired arguments permit sidecar fallback. Timestamped handoffs
   older than 12 hours are ignored unless they hold a live lease.
+- A live lease has `lease_version:1`, `telemetry_requested:true`, a telemetry
+  directory, and a `lease_expires_at_unix_ms` after the current time but no more
+  than 30 seconds after it. The desktop app sets each lease to expire 5 seconds
+  ahead and renews it every second, so a later expiry can only come from a
+  broken handoff, and it must not keep a recording attached.
 - Old recorder session aliases and `session-payload.json` are not supported.
 
 ## Editor collection policy and dynamic recording
@@ -46,10 +53,9 @@ Recording-only collection defaults on (`enableInEditorWhileRecording` /
 switch true means Always. Master disable, force-disable where provided,
 automation restrictions and missing configuration still prevent collection.
 
-A recording-only editor association requires the desktop app's live lease:
-`lease_version:1`, `telemetry_requested:true` and a future
-`lease_expires_at_unix_ms`, alongside the existing recording identity and
-telemetry directory. Legacy static payloads do not override editor-off policy.
+A recording-only editor association requires the desktop app's live lease, as
+defined under Identity and recording, alongside the recording identity. Legacy
+static payloads do not override editor-off policy.
 Discovery continues independently of collection and gameplay clocks in editor,
 standalone and packaged hosts. A valid
 recording can attach during an already-running Play session; successive

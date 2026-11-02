@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "kind": "lifecycle",
+  "summary": "Events refused by a full queue during a recording are counted in that recording's completion marker.",
+  "covers": ["Recording delivery completion", "Transport and limits"],
+  "clock_start_unix_ms": 1767225600000,
+  "environment": "build",
+  "collector": "accept",
+  "settings": { "queue_max_events": 1 },
+  "steps": [
+    { "handoff": { "recording_uuid": "example-recording", "telemetry_directory": "{telemetry_directory}" } },
+    { "start": {} },
+    { "flush": {} },
+    { "track": "kept", "accepted": true },
+    { "track": "overflow", "accepted": false },
+    { "create_file": "closed.json" },
+    { "poll": {} },
+    { "flush": {} },
+    { "shutdown": {} }
+  ],
+  "expect": {
+    "events": [
+      { "$name": "kept", "$tf": { "recording_uuid": "example-recording" } },
+      { "$name": "$tf_telemetry_complete", "dropped_events": 1, "$tf": { "recording_uuid": "example-recording" } }
+    ]
+  }
+}

@@ -10,11 +10,14 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = "release-files.txt"
 METADATA = {
-    "TestingFloor.uplugin", "README.md", "LICENSE.md", "CHANGELOG.md", "ThirdPartyNotices.md", "CONTRIBUTING.md", "AGENTS.md", "SDK_CONTRACT.md"
+    "TestingFloor.uplugin", "README.md", "LICENSE.md", "CHANGELOG.md", "ThirdPartyNotices.md", "CONTRIBUTING.md", "AGENTS.md"
 }
-# The automation tests read the telemetry contract, so it ships with them and with BuildPlugin packages.
-CONTRACT = "Tests/Contract/telemetry_contract.json"
-TEST_FILES = {CONTRACT, "Tests/Contract/README.md", "Config/FilterPlugin.ini"}
+# The automation tests read the published SDK contract in Tests/Contract, so the whole copy ships with
+# them and with BuildPlugin packages.
+CONTRACT_DIR = "Tests/Contract/"
+CONTRACT = CONTRACT_DIR + "telemetry_contract.json"
+CONTRACT_FILES = {CONTRACT, CONTRACT_DIR + "SDK_CONTRACT.md", CONTRACT_DIR + "README.md", CONTRACT_DIR + "scenarios/README.md"}
+TEST_FILES = {"Config/FilterPlugin.ini"}
 VENDOR = "Source/TestingFloorSdk/Private/ThirdParty/QrCodeGenerator/"
 VENDOR_HASHES = {
     "qrcodegen.c": "300eff07ee25baaa7578f20284411638154716379437391e7e689c0e6ce81403",
@@ -42,7 +45,7 @@ def release_files(root=ROOT):
             raise ValueError(f"Invalid release path: {entry}")
         if any(part.startswith(".") for part in path.parts):
             raise ValueError(f"Hidden files cannot be distributed: {entry}")
-        if path.parts[0] != "Source" and entry not in METADATA | TEST_FILES:
+        if path.parts[0] != "Source" and not entry.startswith(CONTRACT_DIR) and entry not in METADATA | TEST_FILES:
             raise ValueError(f"Unexpected release file: {entry}")
         if path.parts[0] == "Source" and path.suffix not in {".cpp", ".h", ".c", ".cs", ".md"}:
             raise ValueError(f"Unexpected source extension: {entry}")
@@ -61,12 +64,17 @@ def validate(root=ROOT):
     included = {file.relative_to(root).as_posix() for file in files}
     if not METADATA.issubset(included):
         raise ValueError("Release manifest omits required metadata or licenses")
-    if not TEST_FILES.issubset(included):
+    if not (TEST_FILES | CONTRACT_FILES).issubset(included):
         raise ValueError("Release manifest omits the telemetry contract the SDK tests read")
-    try:
-        json.loads((root / CONTRACT).read_text(encoding="utf-8"))
-    except ValueError as error:
-        raise ValueError(f"Telemetry contract is not valid JSON: {error}") from error
+    contract_files = {p.relative_to(root).as_posix() for p in (root / CONTRACT_DIR).rglob("*") if p.is_file()}
+    if contract_files != {entry for entry in included if entry.startswith(CONTRACT_DIR)}:
+        raise ValueError("Contract copy and release manifest disagree")
+    for entry in sorted(entry for entry in included if entry.startswith(CONTRACT_DIR) and entry.endswith(".json")):
+        try:
+            json.loads((root / entry).read_text(encoding="utf-8"))
+        except ValueError as error:
+            name = "Telemetry contract" if entry == CONTRACT else entry
+            raise ValueError(f"{name} is not valid JSON: {error}") from error
     source_files = {p.relative_to(root).as_posix() for p in (root / "Source").rglob("*") if p.is_file()}
     if source_files != {entry for entry in included if entry.startswith("Source/")}:
         raise ValueError("Source tree and release manifest disagree")
