@@ -370,7 +370,7 @@ private:
 		}
 	}
 
-	/** Every expected field must match; a null expectation means the field is absent. */
+	/** Every expected field must match. A null expectation means the field is absent, not present as JSON null. */
 	void Match(const FObject& Actual, const FJsonObject& Expected, const FString& Path, TArray<FString>& Problems) const
 	{
 		for (const auto& Field : Expected.Values)
@@ -381,9 +381,9 @@ private:
 			const FValue& Want = Field.Value;
 			if (Want->IsNull())
 			{
-				if (Found.IsValid() && !Found->IsNull())
+				if (Found.IsValid())
 				{
-					Problems.Add(Name + TEXT(" should be absent"));
+					Problems.Add(FString::Printf(TEXT("%s should be absent, but is %s"), *Name, *ValueText(Found)));
 				}
 			}
 			else if (!Found.IsValid())
