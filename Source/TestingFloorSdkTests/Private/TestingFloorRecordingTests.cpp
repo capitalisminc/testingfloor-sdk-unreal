@@ -86,7 +86,7 @@ bool FTestingFloorRecordingResolutionTest::RunTest(const FString& Parameters)
 	const FString Stale = FString::Printf(TEXT(R"TF({"recording_uuid":"stale","created_at_unix_ms":%lld})TF"), Boundary - 1);
 	TestTrue(TEXT("Exactly twelve-hour-old payload remains valid to the millisecond"), TestingFloor::FRecordingContext::Parse(Fresh, Now).IsSet());
 	TestFalse(TEXT("One millisecond beyond recorder lifetime is stale"), TestingFloor::FRecordingContext::Parse(Stale, Now).IsSet());
-	const FString RenewedOldLease = FString::Printf(TEXT(R"TF({"recording_uuid":"renewed","created_at_unix_ms":%lld,"lease_version":1,"telemetry_requested":true,"lease_expires_at_unix_ms":%lld})TF"), Boundary - 1, NowMilliseconds + 5000);
+	const FString RenewedOldLease = FString::Printf(TEXT(R"TF({"recording_uuid":"renewed","created_at_unix_ms":%lld,"telemetry_directory":"/example/telemetry","lease_version":1,"telemetry_requested":true,"lease_expires_at_unix_ms":%lld})TF"), Boundary - 1, NowMilliseconds + 5000);
 	TestTrue(TEXT("A verifiably fresh lease outlives the static handoff age limit"), TestingFloor::FRecordingContext::Parse(RenewedOldLease, Now).IsSet());
 	TestFalse(TEXT("An expired lease cannot bypass the static age limit"), TestingFloor::FRecordingContext::Parse(RenewedOldLease, Now + FTimespan::FromSeconds(5)).IsSet());
 	TestTrue(TEXT("Outlying future timestamps do not overflow date construction"), TestingFloor::FRecordingContext::Parse(TEXT(R"TF({"recording_uuid":"future","created_at_unix_ms":9223372036854775807})TF"), Now).IsSet());
@@ -378,12 +378,19 @@ bool FTestingFloorRecordingOnlyPolicyTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("A legacy static payload cannot override editor-off policy"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
 	Recording.LeaseVersion = 1;
 	Recording.bTelemetryRequested = true;
+	Recording.TelemetryDirectory = TEXT("/example/telemetry");
 	Recording.LeaseExpiresAtUnixMilliseconds = Now.ToUnixTimestamp() * 1000 + 5000;
 	Settings.Recording = Recording;
 	TestTrue(TEXT("A live requested recording permits editor collection"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
 	TestFalse(TEXT("Expired lease cannot permit collection"), TestingFloor::ShouldCollect(Settings, { true, false }, Now + FTimespan::FromSeconds(5)));
 	Settings.Recording->bTelemetryRequested = false;
 	TestFalse(TEXT("The desktop telemetry request is required"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
+	Settings.Recording = Recording;
+	Settings.Recording->LeaseExpiresAtUnixMilliseconds = Now.ToUnixTimestamp() * 1000 + 30001;
+	TestFalse(TEXT("A lease more than 30 seconds ahead cannot permit collection"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
+	Settings.Recording = Recording;
+	Settings.Recording->TelemetryDirectory.Empty();
+	TestFalse(TEXT("A lease without a telemetry directory cannot permit collection"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
 	Settings.Recording = Recording;
 	Settings.bEnableInEditorWhileRecording = false;
 	TestFalse(TEXT("Never policy is an explicit opt-out"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
@@ -395,7 +402,7 @@ bool FTestingFloorRecordingOnlyPolicyTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Recording never overrides automation"), TestingFloor::ShouldCollect(Settings, { true, true }, Now));
 	Settings.WriteKey.Empty();
 	TestFalse(TEXT("Recording never supplies missing credentials"), TestingFloor::ShouldCollect(Settings, { true, false }, Now));
-	const FString LeaseJson = FString::Printf(TEXT(R"TF({"recording_uuid":"new-recording","lease_version":1,"telemetry_requested":true,"lease_expires_at_unix_ms":%lld})TF"), Recording.LeaseExpiresAtUnixMilliseconds);
+	const FString LeaseJson = FString::Printf(TEXT(R"TF({"recording_uuid":"new-recording","telemetry_directory":"/example/telemetry","lease_version":1,"telemetry_requested":true,"lease_expires_at_unix_ms":%lld})TF"), Recording.LeaseExpiresAtUnixMilliseconds);
 	const auto Resolved = TestingFloor::FRecordingContext::Resolve(TEXT(R"TF(--testing-floor={"recording_uuid":"old-recording"})TF"), TArray<FString>{ LeaseJson }, Now);
 	TF_REQUIRE_TRUE(Resolved.IsSet(), "Editor lease parsed");
 	TestEqual(TEXT("Editor lease supersedes the old launch context"), Resolved->RecordingUUID, FString(TEXT("new-recording")));

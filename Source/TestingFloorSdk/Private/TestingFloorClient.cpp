@@ -385,12 +385,14 @@ const TMap<FString, TSharedPtr<FJsonValue>>& FProperties::GetValues() const
 
 bool FRecordingContext::HasLiveLease(FDateTime Now) const
 {
-	return LeaseVersion == 1 && LeaseExpiresAtUnixMilliseconds > Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond();
+	// The desktop app renews a 5-second lease every second, so a later expiry comes from a broken handoff.
+	const int64 NowMilliseconds = Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond();
+	return LeaseVersion == 1 && LeaseExpiresAtUnixMilliseconds > NowMilliseconds && LeaseExpiresAtUnixMilliseconds <= NowMilliseconds + 30000;
 }
 
 bool FRecordingContext::HasActiveLease(FDateTime Now) const
 {
-	return bTelemetryRequested && HasLiveLease(Now);
+	return bTelemetryRequested && !TelemetryDirectory.IsEmpty() && HasLiveLease(Now);
 }
 
 TOptional<FRecordingContext> FRecordingContext::Discover(FDateTime Now)
@@ -427,7 +429,7 @@ TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDate
 	Object->TryGetBoolField(TEXT("telemetry_requested"), Result.bTelemetryRequested);
 	int64 CreatedAt = 0;
 	const int64 NowMilliseconds = Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond();
-	if (!Result.HasLiveLease(Now) && Object->TryGetNumberField(TEXT("created_at_unix_ms"), CreatedAt) && CreatedAt > 0
+	if (!Result.HasActiveLease(Now) && Object->TryGetNumberField(TEXT("created_at_unix_ms"), CreatedAt) && CreatedAt > 0
 		&& CreatedAt < NowMilliseconds - 12LL * 60 * 60 * 1000)
 	{
 		return {};
