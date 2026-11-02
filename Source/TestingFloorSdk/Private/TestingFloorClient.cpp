@@ -558,7 +558,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 	Private::SetIfPresent(*Object, TEXT("$device_id"), Settings.DeviceID);
 	Private::SetIfPresent(*Object, TEXT("$user_id"), Settings.UserID);
 	const TSharedRef<FJsonObject> Platform = MakeShared<FJsonObject>();
-	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.6.0"));
+	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.7.0"));
 	if (Event.Sequence > 0)
 	{
 		Platform->SetField(TEXT("seq"), MakeShared<FJsonValueNumberString>(LexToString(Event.Sequence)));
@@ -1279,7 +1279,7 @@ void FClient::WriteRecordingStatus(const FRecordingContext& Recording, const TCH
 	Value->SetStringField(TEXT("recording_uuid"), Recording.RecordingUUID);
 	Value->SetStringField(TEXT("session_id"), SessionID);
 	Value->SetStringField(TEXT("engine"), TEXT("unreal"));
-	Value->SetStringField(TEXT("sdk_version"), TEXT("0.6.0"));
+	Value->SetStringField(TEXT("sdk_version"), TEXT("0.7.0"));
 	Value->SetStringField(TEXT("state"), Status);
 	Value->SetStringField(TEXT("reason"), Reason);
 	Value->SetBoolField(TEXT("interrupted"), bRecordingInterrupted);
