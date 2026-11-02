@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0
+
+- Add immutable build identity and recording-only collection in built games.
+- Add one optional output coordinate space for standard events, object samples, directions and lengths.
+- Namespace automatic movement and teleport events under `$tf_`; update filters for the old automatic names.
+
+
 ## 0.7.0 — 2026-11-02
 
 - Turn movement samples on by default: `FSettings::bMovementTracking` is now `true`, and `FMovementSettings::MinPingIntervalSeconds` defaults to 0.1 instead of 0.5, following the SDK contract. A game that set neither now sends `player_moved` up to ten times a second once it registers an activity source, where before it sent none, or two a second once turned on, which drew a half-second jump as a straight line. Games that set these values keep them.

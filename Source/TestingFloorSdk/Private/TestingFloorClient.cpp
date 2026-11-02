@@ -190,10 +190,10 @@ TOptional<FVector> FinitePosition(const TOptional<FVector>& Position)
 }
 
 /** Native centimeters rounded to 1 cm, without a negative zero. */
-TSharedPtr<FJsonValue> Centimeters(double Value)
+double QuantizedCentimeters(double Value)
 {
 	const double Rounded = FMath::RoundToDouble(Value);
-	return MakeShared<FJsonValueNumber>(Rounded == 0.0 ? 0.0 : Rounded);
+	return Rounded == 0.0 ? 0.0 : Rounded;
 }
 
 /** A JSON string's wire size: UTF-8 bytes, quotes and separator, and escapes. */
@@ -535,9 +535,40 @@ TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLi
 	return {};
 }
 
+bool FCoordinateTransform::IsValid() const
+{
+	if (!bEnabled) return true;
+	TSet<int32> Used;
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		const int32 Axis = Axes[Index];
+		if (Axis < -3 || Axis > 3 || Axis == 0 || Used.Contains(FMath::Abs(Axis))) return false;
+		Used.Add(FMath::Abs(Axis));
+	}
+	return FMath::IsFinite(Scale) && Scale > 0.0 && !Offset.ContainsNaN();
+}
+
+FVector FCoordinateTransform::Direction(const FVector& Value) const
+{
+	if (!bEnabled) return Value;
+	FVector Result = FVector::ZeroVector;
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		const int32 Axis = Axes[Index];
+		Result[Index] = Value[FMath::Abs(Axis) - 1] * (Axis > 0 ? 1.0 : -1.0);
+	}
+	return Result;
+}
+
+FVector FCoordinateTransform::Point(const FVector& Value) const
+{
+	return bEnabled ? Direction(Value) * Scale + Offset : Value;
+}
+
 bool ShouldCollect(const FSettings& Settings, const FEnvironment& Environment, FDateTime Now)
 {
-	return Settings.bEnabled && !Environment.bAutomation
+	return Settings.bEnabled && !Environment.bAutomation && Settings.CoordinateTransform.IsValid()
+		&& (!Settings.bRecordingOnly || (Settings.Recording.IsSet() && Settings.Recording->HasActiveLease(Now)))
 		&& (!Environment.bEditor || Settings.bEnableInEditor
 			|| (Settings.bEnableInEditorWhileRecording && Settings.Recording.IsSet() && Settings.Recording->HasActiveLease(Now)))
 		&& !Settings.WriteKey.TrimStartAndEnd().IsEmpty() && !Settings.Endpoint.TrimStartAndEnd().IsEmpty();
@@ -558,7 +589,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 	Private::SetIfPresent(*Object, TEXT("$device_id"), Settings.DeviceID);
 	Private::SetIfPresent(*Object, TEXT("$user_id"), Settings.UserID);
 	const TSharedRef<FJsonObject> Platform = MakeShared<FJsonObject>();
-	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.7.0"));
+	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.8.0"));
 	if (Event.Sequence > 0)
 	{
 		Platform->SetField(TEXT("seq"), MakeShared<FJsonValueNumberString>(LexToString(Event.Sequence)));
@@ -573,6 +604,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 		Platform->SetStringField(TEXT("engine"), TEXT("Unreal ") + Settings.EngineVersion.TrimStartAndEnd());
 	}
 	Private::SetIfPresent(*Platform, TEXT("app_version"), Settings.AppVersion);
+	Private::SetIfPresent(*Platform, TEXT("build_id"), Settings.BuildID);
 	Private::SetIfPresent(*Platform, TEXT("os"), Settings.OperatingSystem);
 	Private::SetIfPresent(*Platform, TEXT("locale"), Settings.Locale);
 	Private::SetIfPresent(*Platform, TEXT("device_model"), Settings.DeviceModel);
@@ -881,7 +913,7 @@ FClient::FClient(FSettings InSettings, FEnvironment InEnvironment, TSharedRef<IT
 	: Settings(MoveTemp(InSettings)), Environment(InEnvironment), RecordingSource(MoveTemp(InRecordingSource)), Transport(MoveTemp(InTransport)), Clock(MoveTemp(InClock))
 {
 	State = !Settings.bEnabled || Environment.bAutomation ? EState::Disabled
-		: Settings.WriteKey.TrimStartAndEnd().IsEmpty() || Settings.Endpoint.TrimStartAndEnd().IsEmpty() ? EState::NotConfigured : EState::Ok;
+		: !Settings.CoordinateTransform.IsValid() || Settings.WriteKey.TrimStartAndEnd().IsEmpty() || Settings.Endpoint.TrimStartAndEnd().IsEmpty() ? EState::NotConfigured : EState::Ok;
 	SessionID = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
 	if (!RecordingSource && !Environment.bAutomation)
 	{
@@ -1013,6 +1045,12 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 		}
 		return false;
 	}
+	return TrackGameplay(Name, Properties);
+}
+
+bool FClient::TrackGameplay(const FString& Name, const FProperties& Properties)
+{
+	check(IsInGameThread());
 	UpdateRecordingContext(false);
 	if (!IsCollecting() || Name.TrimStartAndEnd().IsEmpty())
 	{
@@ -1050,6 +1088,7 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 		Event.ScreenSize = Sample->ViewportSize;
 	}
 	Event.Properties.Merge(Properties);
+	TransformProperties(Event.Properties);
 	if (EventProcessor)
 	{
 		EventProcessor(Event.Properties);
@@ -1073,6 +1112,33 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 	}
 	LevelContext = MoveTemp(Level);
 	return true;
+}
+
+void FClient::TransformProperties(FProperties& Properties) const
+{
+	const FCoordinateTransform& Space = Settings.CoordinateTransform;
+	if (!Space.bEnabled) return;
+	const auto Number = [&Properties](const FString& Key, double& Out) {
+		const TSharedPtr<FJsonValue>* Value = Properties.GetValues().Find(Key);
+		return Value && Value->IsValid() && (*Value)->TryGetNumber(Out) && FMath::IsFinite(Out);
+	};
+	for (const TCHAR* Prefix : { TEXT("player.position"), TEXT("camera.position"), TEXT("camera.focus"), TEXT("teleport.start.position"), TEXT("teleport.end.position"), TEXT("camera.forward"), TEXT("camera.up") })
+	{
+		const FString Key(Prefix);
+		FVector Point;
+		if (!Number(Key + TEXT(".x"), Point.X) || !Number(Key + TEXT(".y"), Point.Y) || !Number(Key + TEXT(".z"), Point.Z)) continue;
+		const bool bDirection = Key == TEXT("camera.forward") || Key == TEXT("camera.up");
+		Properties.SetVector(Key, bDirection ? Space.Direction(Point) : Space.Point(Point));
+	}
+	// Legacy Unreal movement and teleport lengths are meters, while points and ortho width are centimeters.
+	for (const TCHAR* Key : { TEXT("movement.distance"), TEXT("movement.camera_distance"), TEXT("movement.ortho_width_delta"), TEXT("teleport.distance") })
+	{
+		double Value;
+		if (Number(Key, Value)) Properties.Set(Key, Value * 100.0 * Space.Scale);
+	}
+	double Width;
+	if (Number(TEXT("camera.ortho_width"), Width)) Properties.Set(TEXT("camera.ortho_width"), Width * Space.Scale);
+	for (const TCHAR* Axis : { TEXT("x"), TEXT("y"), TEXT("z") }) Properties.Remove(FString(TEXT("camera.euler.")) + Axis);
 }
 
 bool FClient::Enqueue(FEvent Record)
@@ -1267,9 +1333,10 @@ bool FClient::ConfigurationPermitted() const
 
 bool FClient::CollectionPermitted() const
 {
-	return !Environment.bEditor || Settings.bEnableInEditor
-		|| (Settings.bEnableInEditorWhileRecording && bRecordingRegistered && !bRecordingClosed && !bRecordingSuspended
-			&& Settings.Recording.IsSet() && Settings.Recording->HasActiveLease(Clock()));
+	const bool bActive = bRecordingRegistered && !bRecordingClosed && !bRecordingSuspended
+		&& Settings.Recording.IsSet() && Settings.Recording->HasActiveLease(Clock());
+	return (!Settings.bRecordingOnly || bActive)
+		&& (!Environment.bEditor || Settings.bEnableInEditor || (Settings.bEnableInEditorWhileRecording && bActive));
 }
 
 void FClient::WriteRecordingStatus(const FRecordingContext& Recording, const TCHAR* Status, const TCHAR* Reason)
@@ -1279,7 +1346,7 @@ void FClient::WriteRecordingStatus(const FRecordingContext& Recording, const TCH
 	Value->SetStringField(TEXT("recording_uuid"), Recording.RecordingUUID);
 	Value->SetStringField(TEXT("session_id"), SessionID);
 	Value->SetStringField(TEXT("engine"), TEXT("unreal"));
-	Value->SetStringField(TEXT("sdk_version"), TEXT("0.7.0"));
+	Value->SetStringField(TEXT("sdk_version"), TEXT("0.8.0"));
 	Value->SetStringField(TEXT("state"), Status);
 	Value->SetStringField(TEXT("reason"), Reason);
 	Value->SetBoolField(TEXT("interrupted"), bRecordingInterrupted);
@@ -1315,7 +1382,7 @@ bool FClient::AttachRecording(const FRecordingContext& Recording)
 	const TCHAR* Reason = !Settings.bEnabled ? TEXT("master_disabled") : Environment.bAutomation ? TEXT("automation")
 		: State == EState::NotConfigured ? TEXT("missing_configuration") : State == EState::Rejected ? TEXT("collector_rejected") : TEXT("editor_policy_disabled");
 	const bool bLease = Recording.LeaseVersion != 0;
-	const bool bPermission = ConfigurationPermitted() && (!Environment.bEditor || Settings.bEnableInEditor
+	const bool bPermission = ConfigurationPermitted() && (!Settings.bRecordingOnly || Recording.HasActiveLease(Clock())) && (!Environment.bEditor || Settings.bEnableInEditor
 		|| (Settings.bEnableInEditorWhileRecording && Recording.HasActiveLease(Clock())));
 	if (bLease && !Recording.HasActiveLease(Clock()))
 	{
@@ -1735,7 +1802,7 @@ void FClient::EmitMovement(const TCHAR* Reason, double Distance, double Duration
 		Properties.Set(TEXT("movement.camera_distance"), CameraDistance);
 	if (OrthoWidth > 0.0)
 		Properties.Set(TEXT("movement.ortho_width_delta"), OrthoWidth);
-	Track(TEXT("player_moved"), Properties);
+	TrackGameplay(TEXT("$tf_player_moved"), Properties);
 }
 
 uint64 FClient::BeginTeleport(const FString& Reason)
@@ -1782,7 +1849,7 @@ void FClient::CancelTeleport(uint64 Token)
 
 void FClient::RecordTeleport(const FVector& StartCentimeters, const FVector& EndCentimeters, const FString& Reason, double DurationSeconds)
 {
-	Track(TEXT("player_teleported"), FProperties().Set(TEXT("teleport.kind"), TEXT("teleport")).SetIfPresent(TEXT("teleport.reason"), Reason).SetVector(TEXT("teleport.start.position"), StartCentimeters).SetVector(TEXT("teleport.end.position"), EndCentimeters).Set(TEXT("teleport.duration"), FMath::Max(0.0, DurationSeconds)).Set(TEXT("teleport.distance"), FVector::Distance(StartCentimeters, EndCentimeters) / 100.0));
+	TrackGameplay(TEXT("$tf_player_teleported"), FProperties().Set(TEXT("teleport.kind"), TEXT("teleport")).SetIfPresent(TEXT("teleport.reason"), Reason).SetVector(TEXT("teleport.start.position"), StartCentimeters).SetVector(TEXT("teleport.end.position"), EndCentimeters).Set(TEXT("teleport.duration"), FMath::Max(0.0, DurationSeconds)).Set(TEXT("teleport.distance"), FVector::Distance(StartCentimeters, EndCentimeters) / 100.0));
 	ResetMovement();
 }
 
@@ -2113,9 +2180,10 @@ void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
 			{
 				SampleIDs.Add(MakeShared<FJsonValueString>(Row.ID));
 				Kinds.Add(MakeShared<FJsonValueString>(Row.Kind));
-				X.Add(Private::Centimeters(Sample.X));
-				Y.Add(Private::Centimeters(Sample.Y));
-				Z.Add(Private::Centimeters(Sample.Z));
+				const FVector Output = Settings.CoordinateTransform.Point(FVector(Private::QuantizedCentimeters(Sample.X), Private::QuantizedCentimeters(Sample.Y), Private::QuantizedCentimeters(Sample.Z)));
+				X.Add(MakeShared<FJsonValueNumber>(Output.X));
+				Y.Add(MakeShared<FJsonValueNumber>(Output.Y));
+				Z.Add(MakeShared<FJsonValueNumber>(Output.Z));
 			}
 			for (const auto& Pair : Row.State)
 			{
@@ -2198,7 +2266,7 @@ FString FClient::GetCollectionReason() const
 	if (!Settings.bEnabled) return TEXT("master_disabled");
 	if (State == EState::NotConfigured) return TEXT("missing_configuration");
 	if (State == EState::Rejected) return TEXT("collector_rejected");
-	return TEXT("editor_policy_disabled");
+	return Settings.bRecordingOnly ? TEXT("recording_required") : TEXT("editor_policy_disabled");
 }
 
 void FClient::NotifyRecordingChanged()

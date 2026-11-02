@@ -136,11 +136,11 @@ sidecar, so its recording handoff and recording state reach it over the web.
   answers as a desktop SDK uses the lease and `closed.json`: a lease that runs out
   suspends the association and marks an interruption, and `"closed": true`
   completes it. Until the first answer, and for a recording the endpoint does not
-  know, events carry the recording without a lease.
+  know, events carry the recording only within one bounded startup confirmation window. A 404 never extends that window or revives an expired confirmed lease. The current browser release uses 20 seconds.
 - A browser run does not register and writes no status file. Consumers find it
   by the recording UUID on its events.
 - The SDK completes the run when the page is hidden for good (`pagehide`) and
-  hands what is still queued to `sendBeacon`.
+  hands what is still queued to `sendBeacon`. Beacon acceptance is unconfirmed delivery: its completion marker is interrupted, even when dropped_events is zero. Only acknowledgement of preceding requests establishes a complete ordered delivery.
 - `$tf.os` is `Web`. `$tf.engine` is the game's framework and version when the
   game supplies it.
 
@@ -202,7 +202,7 @@ keyframes.
 
 ## Transport and limits
 
-| Setting | Default / limit |
+| Setting | Current release default / wire limit |
 | --- | --- |
 | Endpoint | `https://dataentry.testingfloor.com/v1/batch` |
 | Event envelope | `$id`, `$name`, `$time`, `$schema: 2`, `$session_id`, optional identities and `$tf` |
@@ -216,6 +216,14 @@ keyframes.
 | Request timeout | 10 seconds |
 | Retry delay | 1 second, doubling to a maximum of 30 seconds |
 | Explicit shutdown flush | Best effort; at most 5 seconds |
+
+Batch sizes, flush intervals, pending capacities, request deadlines, retry cadence,
+shutdown budgets and sampling cadence above are release tuning defaults. They
+may differ by engine and change between releases. Wire size/count limits and
+observable semantics remain normative: ordered retries retain IDs and captured
+values, capacity is bounded, dropped records are counted, and unacknowledged
+delivery never becomes proof of completeness. Scenario fixtures may select
+specific timings to exercise these semantics without promising those defaults.
 
 Network failures, HTTP 408/429, and server errors retain queued events for retry.
 HTTP 401/403 reject collection for the rest of the play session. Other HTTP 4xx
@@ -306,3 +314,49 @@ Every record is sent with `$schema: 2` and `$tf.seq`: a counter that starts at 1
 - `$tf_telemetry_complete` is a record too. It takes the next `$tf.seq`.
 - Dropped `$tf_state` and `$tf_objects` records count toward `dropped_events`, and the SDK sends a keyframe after any drop.
 - After a recording closes, `$tf_state` and `$tf_objects` records stop carrying its recording UUID, the same as events. When a Play run registers with a new recording, the SDK sends a keyframe of session state and live objects.
+
++
++## Build identity and spatial conversion
++
++`buildId` (`build_id` on the wire) is an optional, immutable game-owned identifier,
++such as a CI artifact identity. Configure the same value in the SDK, build upload
++and map publication. `appVersion` remains a readable label and a legacy map
++fallback. Never infer immutable identity from a version label or rotating key.
++
++Every host offers an optional `recording_only` collection mode. Recording
++association discovery continues while producers are dormant. An active recording
++permits collection, pause/expiry suspends it, and a fresh active lease resumes it.
++The existing always-collect mode remains the default; editor gates still apply.
++
++Automatic movement and teleport events use `$tf_player_moved` and
++`$tf_player_teleported`. They remain gameplay samples for analytics and spatial
++readers; they are not state/object control records to exclude. Readers continue
++to accept historical `player_moved` and `player_teleported` data without renaming
++customer-authored events with those names.
++
++An optional declared coordinate transform is one uniform similarity transform:
++three distinct signed source axes, positive uniform scale, and an output offset.
++For example axes `[1, -2, 3]`, scale `2`, offset `[10, 20, 30]` maps native
++`[1, 2, 3]` to `[12, 16, 36]`. Points include offset; directions apply only the
++signed axis permutation; lengths apply scale. This covers event player/camera
++points, camera forward/up, focus points, teleport endpoints and distances,
++movement length totals, orthographic widths and tracked-object samples.
++
++Without a transform, existing native-coordinate behavior stays intact. With a
++transform, emitted lengths use the output coordinate unit. Unreal converts its
++legacy metre-valued scalar fields back to source centimetres before applying
++the transform. Sampling thresholds retain their documented source units and are
++compared in source space, which is equivalent to scaling both distance and
++threshold. Translation never changes direction or length. Raw Euler metadata is
++omitted when a transform is active; forward/up express orientation in output
++space. Arbitrary game properties and object state are not guessed to be spatial.
++An event processor runs after conversion and may intentionally override fields.
++Remove an old event-processor coordinate conversion when enabling this seam.
++
++
++Map bounds, selected axes and world-units-per-metre settings describe the output
++coordinate space. A transform does not rewrite a previously uploaded map image
++or historical events. Changing the game's coordinate declaration requires a new
++build ID and matching map publication. Object sample quantization retains its
++native precision before conversion rather than rounding small output units away.
++

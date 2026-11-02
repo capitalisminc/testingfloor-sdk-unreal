@@ -640,7 +640,7 @@ bool FTestingFloorTeleportRecordingBoundaryTest::RunTest(const FString& Paramete
 	const int32 ReadsBeforeOldEnd = PositionReads;
 	Client->EndTeleport(AToken);
 	TestEqual(TEXT("Old scope cannot sample in a new recording"), PositionReads, ReadsBeforeOldEnd);
-	TestFalse(TEXT("A teleport cannot carry pre-recording positions into B"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("player_teleported"); }));
+	TestFalse(TEXT("A teleport cannot carry pre-recording positions into B"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_player_teleported"); }));
 	Client->Shutdown(0.0);
 	IFileManager::Get().DeleteDirectory(*Directory, false, true);
 	return true;
@@ -991,6 +991,38 @@ bool FTestingFloorEditorProcessScopeTest::RunTest(const FString& Parameters)
 		const auto Discovered = TestingFloor::FRecordingContext::Discover(Now);
 		TestTrue(TEXT("Discovery accepts this editor's handoff file"), Discovered.IsSet() && Discovered->RecordingUUID == TEXT("this-editor"));
 	}
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorBuiltRecordingOnlyTest, "TestingFloor.Sdk.BuiltGameRecordingOnly", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorBuiltRecordingOnlyTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorRecordingTests;
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*Directory, false, true); };
+	FDateTime Now(2026, 1, 1);
+	TOptional<TestingFloor::FRecordingContext> Current;
+	auto Config = Settings();
+	Config.bRecordingOnly = true;
+	const auto Client = TestingFloor::FClient::Create(Config, {}, MakeShared<FCapturingTransport>(), [&Now] { return Now; }, [&Current](FDateTime) { return Current; });
+	TestFalse(TEXT("Built games can wait for an active recording"), Client->IsCollecting());
+	TestEqual(TEXT("Waiting reason"), Client->GetCollectionReason(), FString(TEXT("recording_required")));
+	TestTrue(TEXT("Dormant objects can register"), Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }) != 0);
+	Current = Lease(TEXT("example-recording"), Directory, Now);
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.0);
+	TestTrue(TEXT("Discovery stays active while waiting"), Client->IsCollecting());
+	TestTrue(TEXT("Dormant objects join recording"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_objects"); }));
+	Current->bTelemetryRequested = false;
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.25);
+	TestFalse(TEXT("Pause stops collection"), Client->IsCollecting());
+	Current->bTelemetryRequested = true;
+	Now += FTimespan::FromMilliseconds(250);
+	Client->Tick(0.5);
+	TestTrue(TEXT("Renewal resumes collection"), Client->IsCollecting());
+	Client->Shutdown(0.0);
 	return true;
 }
 

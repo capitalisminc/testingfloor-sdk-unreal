@@ -66,9 +66,24 @@ struct TESTINGFLOORSDK_API FRecordingContext
 	static TOptional<FRecordingContext> Resolve(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now, int64 EditorProcessID = 0);
 };
 
+/** Optional uniform output space. Native movement thresholds stay in their documented units. */
+struct TESTINGFLOORSDK_API FCoordinateTransform
+{
+	bool bEnabled = false;
+	FIntVector Axes = FIntVector(1, 2, 3);
+	double Scale = 1.0;
+	FVector Offset = FVector::ZeroVector;
+	bool IsValid() const;
+	FVector Point(const FVector& Value) const;
+	FVector Direction(const FVector& Value) const;
+};
+
 struct FSettings
 {
 	bool bEnabled = true;
+	/** Collect only during an active recording, in built games as well as the editor. */
+	bool bRecordingOnly = false;
+	FCoordinateTransform CoordinateTransform;
 	bool bEnableInEditor = false;
 	/** Permit editor telemetry only while attached to a live desktop recording lease. */
 	bool bEnableInEditorWhileRecording = true;
@@ -77,6 +92,8 @@ struct FSettings
 	FString DeviceID;
 	FString UserID;
 	FString AppVersion;
+	/** Immutable artifact identity, separate from the display version. */
+	FString BuildID;
 	FString EngineVersion;
 	FString OperatingSystem;
 	FString Locale;
@@ -86,7 +103,7 @@ struct FSettings
 	int32 BatchMaxEvents = 50;
 	double FlushIntervalSeconds = 0.25;
 	int32 QueueMaxEvents = 4096;
-	/** Send player_moved samples from the activity source. On by default; nothing is sent without one. */
+	/** Send $tf_player_moved samples from the activity source. On by default; nothing is sent without one. */
 	bool bMovementTracking = true;
 	/** Tracked-object checks per second of unscaled time, clamped to 1-10. */
 	double ObjectChecksPerSecond = 4.0;
@@ -303,6 +320,8 @@ public:
 
 private:
 	FClient(FSettings Settings, FEnvironment Environment, TSharedRef<ITransport> Transport, FClock Clock, FRecordingSource RecordingSource);
+	bool TrackGameplay(const FString& Name, const FProperties& Properties);
+	void TransformProperties(FProperties& Properties) const;
 	void CompleteSend(int32 ResponseCode, bool bSucceeded);
 	void FinishRecording(const TCHAR* Reason = TEXT("recording_closed"));
 	void CheckRecordingClosed();
