@@ -31,8 +31,11 @@ contract is authoritative.
   Track meaningful gameplay events such as `level_started` yourself.
 - The current handoff is `--testing-floor={"recording_uuid":"example-recording"}`.
   Optional fields are `playtest_id`, `suppress_qr` (defaults true), and `created_at_unix_ms`.
-- Editor sidecars are `Library/TestingFloor/recording-payload.json` for Unity and
-  `Saved/TestingFloor/recording-payload.json` for Unreal. The recorder owns their lifetime.
+- Editor sidecars are `Library/TestingFloor/recording-payload.json` for Unity,
+  `Saved/TestingFloor/recording-payload.json` for Unreal and
+  `.godot/TestingFloor/recording-payload.json` for Godot. The recorder owns their lifetime.
+  Godot runs Play from the editor in a separate process, so its handoff is
+  project-scoped and `editor_pid` is not compared.
 - A versioned recording lease sidecar supersedes the launch argument, including
   when its lease has expired, so expiry cannot revive an old launch association.
   Otherwise a valid launch argument takes precedence over a legacy sidecar.
@@ -111,6 +114,35 @@ events carry the recording UUID, therefore closes the recording's delivery
 barrier. An empty participant list with no such runs means the recording has no
 telemetry. Crashes or failed shutdown flushes can leave a participant without a
 marker; consumers must use a bounded timeout and preserve the incomplete status.
+
+## Browser games
+
+A game running in a web page cannot read launch arguments, files or an editor
+sidecar, so its recording handoff and recording state reach it over the web.
+
+- When Testing Floor opens a browser game for a recording, it adds the recording
+  to the game's URL. The desktop app adds the query parameters
+  `tf_recording_uuid` and `tf_suppress_qr`. A `#testing-floor=<JSON>` fragment,
+  holding the same fields as the launch argument, wins over them. The SDK keeps
+  the handoff in the tab's session storage, so reloading the tab keeps the
+  recording, and removes the fragment from the address bar.
+- The SDK reads the recording's state with `POST
+  https://api.testingfloor.com/telemetry/recording_state`, sending
+  `{"$write_key": "...", "recording_uuid": "..."}` as `text/plain` so the
+  browser skips a preflight. An open recording answers `"closed": false` with a
+  `lease_expires_at_unix_ms` 20 seconds ahead and `"state"` `recording` or
+  `paused`. A closed one answers `"closed": true`. An unknown one answers 404.
+- The SDK polls about every 5 seconds while a recording is attached and uses the
+  answers as a desktop SDK uses the lease and `closed.json`: a lease that runs out
+  suspends the association and marks an interruption, and `"closed": true`
+  completes it. Until the first answer, and for a recording the endpoint does not
+  know, events carry the recording without a lease.
+- A browser run does not register and writes no status file. Consumers find it
+  by the recording UUID on its events.
+- The SDK completes the run when the page is hidden for good (`pagehide`) and
+  hands what is still queued to `sendBeacon`.
+- `$tf.os` is `Web`. `$tf.engine` is the game's framework and version when the
+  game supplies it.
 
 ## Event capture and properties
 
@@ -196,14 +228,14 @@ can lose events. Pending and dropped counters provide local diagnostics.
 
 ## Spatial data and activity
 
-| Value | Unity | Unreal |
-| --- | --- | --- |
-| Position / teleport endpoints | Native meters | Native centimeters |
-| Movement thresholds and scalar distances | Meters | Meters |
-| Angles and rotation metrics | Degrees | Degrees |
-| `camera.fov_axis` | `vertical` | `horizontal` |
-| Default map plane | X/Z | X/Y |
-| Default world units per meter | 1 | 100 |
+| Value | Unity | Unreal | Godot |
+| --- | --- | --- | --- |
+| Position / teleport endpoints | Native meters | Native centimeters | Native meters in 3D; pixels in 2D, with Z 0 |
+| Movement thresholds and scalar distances | Meters | Meters | Meters |
+| Angles and rotation metrics | Degrees | Degrees | Degrees |
+| `camera.fov_axis` | `vertical` | `horizontal` | `vertical` |
+| Default map plane | X/Z | X/Y | X/Z in 3D, X/Y in 2D |
+| Default world units per meter | 1 | 100 | 1 |
 
 Every available player or camera sample attaches `player.position.*`,
 `camera.position.*`, `camera.euler.*`, `camera.forward.*` and `camera.up.*` to
@@ -216,9 +248,12 @@ are session state. Missing sources omit their fields. Native camera Euler
 conventions differ; use `camera.forward` and the map's configured axes for
 spatial projection.
 
-Movement defaults off. Opting in emits debounced `player_moved` events for
-player movement or camera-only position, rotation, FOV and orthographic width
-changes. Reasons are `start`, `ping`, and `stop`. Ping metrics cover the segment
+Movement defaults on. Once the game supplies a player or camera sample, the SDK
+emits debounced `player_moved` events for player movement or camera-only
+position, rotation, FOV and orthographic width changes, and a game can turn
+them off. Pings come at most every 0.1 seconds by default, so a half-second
+jump gets several samples; a game may raise the interval to send fewer. Reasons
+are `start`, `ping`, and `stop`. Ping metrics cover the segment
 since the previous ping; stop metrics cover the whole run. Zero movement must
 remain still, even when a threshold is zero. Sampling and QR timing continue
 while gameplay pauses.
@@ -230,16 +265,16 @@ emitting a teleport event.
 
 ## Safe defaults
 
-Collection requires a write key. Ordinary editor collection, movement events, and
-QR markers default off. Automated engine tests cannot enable live collection or
+Collection requires a write key. Ordinary editor collection and QR markers
+default off. Automated engine tests cannot enable live collection or
 markers, including through a force-QR override. Do not put personal data, write
 keys, or other credentials in event properties or public examples.
 
 QR payloads use `tfqr://sync/v1?s=<play-session-id>&t=<unix-ms>&q=<sequence>`.
 Defaults are a 15-second interval, continuous visibility, inverted colors, and a
 four-module quiet zone. Recorder suppression hides the marker unless explicitly
-overridden; `--forceqr` and `-forceqr` are recognized. Unity supplies the overlay;
-Unreal supplies marker pixels for the host game's UI.
+overridden; `--forceqr` and `-forceqr` are recognized. Unity and Godot supply the
+overlay; Unreal supplies marker pixels for the host game's UI.
 
 ## Schema 2: session state and tracked objects
 

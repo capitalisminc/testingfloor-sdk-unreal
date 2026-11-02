@@ -109,6 +109,14 @@ bool FTestingFloorGateTest::RunTest(const FString& Parameters)
 }
 
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorMovementDefaultsTest, "TestingFloor.Sdk.MovementDefaults", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorMovementDefaultsTest::RunTest(const FString& Parameters)
+{
+	TestTrue(TEXT("Movement samples feed the map's paths and heatmaps, so they are on by default"), TestingFloor::FSettings().bMovementTracking);
+	TestEqual(TEXT("A half-second jump gets several samples"), TestingFloor::FMovementSettings().MinPingIntervalSeconds, 0.1);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorPayloadTest, "TestingFloor.Sdk.TypedPayloadAndSnapshot", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
 bool FTestingFloorPayloadTest::RunTest(const FString& Parameters)
 {

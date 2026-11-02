@@ -306,11 +306,8 @@ For maps using the standard Unreal coordinate frame, choose X/Y projection axes,
 
 ## Movement Events
 
-After registering an activity source, opt into debounced movement events:
-
-```cpp
-Client->SetMovementTrackingEnabled(true);
-```
+After you register an activity source, the SDK sends debounced movement events.
+Testing Floor draws player paths and position heatmaps from them.
 
 `player_moved` reports `movement.reason` as `start`, `ping`, or `stop`. Movement
 includes camera position, rotation, FOV and orthographic width activity. Nonzero
@@ -319,9 +316,11 @@ metrics include `movement.distance`, `movement.camera_distance`,
 and `movement.duration`. Ping metrics cover the segment
 since the previous ping; stop metrics cover the full movement run.
 
-Defaults target about two path samples per second. Tune `FMovementSettings` with
-`SetMovementSettings`, or enable movement by default with
-`FSettings::bMovementTracking`. Movement is off by default.
+Movement is on by default and pings up to ten times a second while the player
+moves, so a half-second jump draws as an arc. Raise
+`FMovementSettings::MinPingIntervalSeconds` with `SetMovementSettings` to send
+fewer, for example in a slow-moving game, or turn movement off with
+`FSettings::bMovementTracking` or `SetMovementTrackingEnabled(false)`.
 
 ## Teleports
 
