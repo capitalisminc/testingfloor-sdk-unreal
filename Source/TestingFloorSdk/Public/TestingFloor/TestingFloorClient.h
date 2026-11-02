@@ -86,7 +86,8 @@ struct FSettings
 	int32 BatchMaxEvents = 50;
 	double FlushIntervalSeconds = 0.25;
 	int32 QueueMaxEvents = 4096;
-	bool bMovementTracking = false;
+	/** Send player_moved samples from the activity source. On by default; nothing is sent without one. */
+	bool bMovementTracking = true;
 	/** Tracked-object checks per second of unscaled time, clamped to 1-10. */
 	double ObjectChecksPerSecond = 4.0;
 	/** Live tracked objects. Further registrations are ignored, with one warning. */
@@ -145,7 +146,8 @@ struct TESTINGFLOORSDK_API FActivitySample
 struct FMovementSettings
 {
 	double MinPingDistance = 0.5;
-	double MinPingIntervalSeconds = 0.5;
+	/** At most one ping per interval while moving, so a half-second jump gets several samples. */
+	double MinPingIntervalSeconds = 0.1;
 	double StartGraceSeconds = 0.05;
 	double StopGraceSeconds = 0.25;
 	double MinStep = 0.005;

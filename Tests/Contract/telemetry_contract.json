@@ -44,7 +44,7 @@
   "context_fields": [
     { "key": "sdk_version", "type": "string", "set_by": "sdk", "description": "Version of the SDK that sent the event.", "analytics": { "label": "SDK version", "dimension": true } },
     { "key": "editor", "type": "boolean", "set_by": "sdk", "description": "True when the record comes from a Play session inside the engine editor rather than a built game.", "analytics": { "label": "Editor run", "dimension": true } },
-    { "key": "app_version", "type": "string", "set_by": "sdk", "description": "The game's build version, from the engine's version setting. Left out when the engine has none. Map it as the game's app version in telemetry settings to group and filter by build.", "environment_field": "build_version" },
+    { "key": "app_version", "type": "string", "set_by": "sdk", "description": "The game's build version, from the engine's version setting. Left out when the engine has none. Testing Floor groups and filters runs by it as the game's app version unless the game's telemetry settings name another field.", "environment_field": "build_version" },
     { "key": "engine", "type": "string", "set_by": "sdk", "description": "Engine name and version, such as Unity 6000.3.7f1.", "analytics": { "label": "Engine", "dimension": true }, "environment_field": "engine" },
     { "key": "os", "type": "string", "set_by": "sdk", "description": "The operating system family: Windows, macOS, Linux, iOS, Android, tvOS, visionOS, Web, PlayStation, Xbox or Switch, or the engine's platform name for anything else. Unity SDKs before 0.5.0 sent engine names such as WindowsPlayer or OSXEditor.", "analytics": { "label": "OS", "dimension": true }, "environment_field": "platform" },
     { "key": "device_model", "type": "string", "set_by": "sdk", "description": "The device or hardware model the SDK reads from the engine.", "analytics": { "label": "Device", "dimension": true } },
@@ -81,7 +81,7 @@
     { "pattern": "recording_id", "kind": "property", "rule": "platform_only", "description": "Testing Floor adds the recording's ID to desktop app events it relays." }
   ],
   "conventional_properties": [
-    { "key": "game_level.id", "type": "string", "set_by": "game", "status": "suggested", "description": "A stable, game-owned level or map identifier. Tracked-object records copy game_level.* values from the latest event, so maps and paths can split by level." },
+    { "key": "game_level.id", "type": "string", "set_by": "game", "status": "suggested", "description": "A stable, game-owned level or map identifier. Testing Floor reads it as the level unless the game's telemetry settings name another field. Tracked-object records copy game_level.* values from the latest event, so maps and paths can split by level." },
     { "key": "player.position.x", "type": "number", "set_by": "sdk", "status": "current", "unit": "engine units", "description": "Player position on every event when a position source is registered. Feeds the player-position heatmap and the run's path." },
     { "key": "player.position.y", "type": "number", "set_by": "sdk", "status": "current", "unit": "engine units", "description": "Player position, vertical axis in Unity." },
     { "key": "player.position.z", "type": "number", "set_by": "sdk", "status": "current", "unit": "engine units", "description": "Player position." },
@@ -102,7 +102,7 @@
     { "key": "camera.focus.z", "type": "number", "set_by": "sdk", "status": "current", "unit": "engine units", "description": "Point at the center of the view." },
     { "key": "camera.projection", "type": "string", "set_by": "sdk", "status": "current", "description": "Session state: perspective or orthographic." },
     { "key": "camera.fov", "type": "number", "set_by": "sdk", "status": "current", "unit": "degrees", "description": "Field of view of a perspective camera." },
-    { "key": "camera.fov_axis", "type": "string", "set_by": "sdk", "status": "current", "description": "Session state: vertical in Unity, horizontal in Unreal." },
+    { "key": "camera.fov_axis", "type": "string", "set_by": "sdk", "status": "current", "description": "Session state: vertical in Unity and Godot, horizontal in Unreal." },
     { "key": "camera.ortho_width", "type": "number", "set_by": "sdk", "status": "current", "unit": "engine units", "description": "Width of an orthographic camera's view, edge to edge. Sent instead of camera.fov." },
     { "key": "viewport.width", "type": "integer", "set_by": "sdk", "status": "current", "unit": "pixels", "description": "Session state: width of the game view." },
     { "key": "viewport.height", "type": "integer", "set_by": "sdk", "status": "current", "unit": "pixels", "description": "Session state: height of the game view." },
@@ -144,7 +144,7 @@
     { "key": "recording_id", "type": "integer", "events": ["$tf_recording_started", "$tf_recording_paused", "$tf_recording_resumed", "$tf_recording_ended", "$tf_session_start"], "description": "Added by Testing Floor when the recording already exists." }
   ],
   "sdk_events": [
-    { "name": "player_moved", "description": "Optional, off by default. Debounced movement samples with player and camera pose; the main input for player-position heatmaps and paths." },
+    { "name": "player_moved", "description": "On by default once the game supplies a player or camera position. Debounced movement samples, up to ten a second, with player and camera pose; the main input for player-position heatmaps and paths." },
     { "name": "player_teleported", "description": "Sent by the SDK's teleport helpers so paths break at the jump." }
   ],
   "tracked_object_fields": [

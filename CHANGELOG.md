@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Turn movement samples on by default: `FSettings::bMovementTracking` is now `true`, and `FMovementSettings::MinPingIntervalSeconds` defaults to 0.1 instead of 0.5, following the SDK contract. A game that set neither now sends `player_moved` up to ten times a second once it registers an activity source, where before it sent none, or two a second once turned on, which drew a half-second jump as a straight line. Games that set these values keep them.
 - Treat a recording lease as live only when it requests telemetry, names a telemetry directory and expires no more than 30 seconds ahead, as `SDK_CONTRACT.md` and the Unity SDK do. Before, a lease without either field, or one expiring further ahead, kept a handoff older than 12 hours attached and could permit recording-only editor collection. The desktop app's leases always carry both fields and expire 5 seconds ahead, so its recordings are unaffected.
 - Run the shared SDK scenarios in `Tests/Contract/scenarios` as `TestingFloor.Sdk.Scenarios` automation tests, one per file. `Tests/Contract` now holds the whole published SDK contract, including `SDK_CONTRACT.md`, and `scripts/update_contract.py` refreshes it.
 
