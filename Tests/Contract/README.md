@@ -1,23 +1,29 @@
-# Telemetry contract
+# Testing Floor SDK contract
 
-`telemetry_contract.json` is an unedited copy of the Testing Floor telemetry
-contract. It is the reference for wire names and limits: the request and event
-envelope, `$tf` context keys, platform record names, reserved names, value types,
-SDK properties and events, tracked-object fields and limits.
+These files define what every Testing Floor game SDK sends and how it behaves.
+The Unity and Unreal SDKs, and any SDK for another engine, follow them.
 
-The `TestingFloor.Sdk.Contract` automation tests read this copy and compare it
-with what `TestingFloor::FClient` sends. They fail when the SDK and the contract
-disagree. The runtime module never reads the file. It ships with the plugin only
-so that the tests can run in a host project.
+| File | What it holds |
+| --- | --- |
+| `telemetry_contract.json` | Wire field names, record names, value types and limits. |
+| `SDK_CONTRACT.md` | Shared behavior: recording handoff, editor policy, delivery, retries, context. |
+| `scenarios/` | Machine-readable checks of that behavior. Each SDK runs them in its own tests. See [scenarios/README.md](scenarios/README.md). |
 
-Do not edit the file here. When a contract test fails:
+## Where to change it
 
-1. If the SDK is wrong, change the SDK.
-2. If the contract is wrong, have it changed in the Testing Floor telemetry
-   contract, then refresh this copy.
+Testing Floor publishes these files to
+[capitalisminc/testingfloor-sdk-contract](https://github.com/capitalisminc/testingfloor-sdk-contract)
+from its main repository on every change. That repository is a read-only copy.
+Changes are made in Testing Floor's main repository, together with the collector
+or app change that needs them.
 
-To refresh the copy, replace `telemetry_contract.json` with the current contract,
-byte for byte. Then run the `TestingFloor.Sdk.Contract` tests (see
-[CONTRIBUTING.md](../../CONTRIBUTING.md)), and update the SDK and
-[SDK_CONTRACT.md](../../SDK_CONTRACT.md) where they changed. The Unity SDK keeps
-the same copy at the same path.
+## How an SDK uses it
+
+Each SDK keeps an unedited copy of the whole folder with its tests, and records
+the published commit it came from. To refresh the copy, run the SDK's update
+script, then run its tests. When a test fails, either the SDK is wrong, or the
+contract is wrong and needs a change here first. Never edit the copy in an SDK
+to make a test pass.
+
+An SDK for a new engine can start from these files: implement the wire format in
+`telemetry_contract.json`, then write a runner for the scenarios.

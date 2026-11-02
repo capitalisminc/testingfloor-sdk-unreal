@@ -44,17 +44,28 @@ Before publishing a version, build the runtime target and Editor target and run
 the automation filter on every platform and engine version you claim to support.
 Verify any game-specific lifecycle and overlay integration in its host project.
 
-## Telemetry contract
+## SDK contract
 
-`Tests/Contract/telemetry_contract.json` is an unedited copy of the Testing Floor
-telemetry contract, the reference for wire field names, types and limits. The
-`TestingFloor.Sdk.Contract` tests compare what the client sends with it: the
-request and event envelope, `$tf` keys, platform record names, tracked-object
-fields, the SDK's own properties and events, value types and limits. Never edit
-the copy to make a test pass. Fix the SDK, or have the contract changed and
-replace the copy byte for byte. See [Tests/Contract/README.md](Tests/Contract/README.md).
-The copy ships with the plugin so that the tests can run in a host project;
-`Config/FilterPlugin.ini` keeps it in `BuildPlugin` packages.
+`Tests/Contract` is an unedited copy of the published
+[Testing Floor SDK contract](https://github.com/capitalisminc/testingfloor-sdk-contract),
+which every Testing Floor SDK follows:
+
+- `telemetry_contract.json` holds wire field names, types and limits. The
+  `TestingFloor.Sdk.Contract` tests compare what the client sends with it: the
+  request and event envelope, `$tf` keys, platform record names, tracked-object
+  fields, the SDK's own properties and events, value types and limits.
+- `SDK_CONTRACT.md` describes the shared behavior.
+- `scenarios/` checks that behavior. `TestingFloor.Sdk.Scenarios` runs each file
+  as one automation test through `FClient`'s clock, recording-source and
+  transport seams; `scenarios/README.md` describes the format.
+
+`Tests/contract-source.json` records the published commit the copy came from.
+Refresh the copy with `python3 scripts/update_contract.py`, then run the
+`TestingFloor.Sdk` tests. `--check` confirms the copy still matches its recorded
+commit, and `--from <folder>` tries an unpublished change locally. Never edit the
+copy to make a test pass. Fix the SDK, or have the contract changed where it is
+published and copy it again. The copy ships with the plugin so that the tests can
+run in a host project; `Config/FilterPlugin.ini` keeps it in `BuildPlugin` packages.
 
 ## Package
 
@@ -76,4 +87,4 @@ For a platform-specific binary package, use your installed engine's `RunUAT`
 Review the resulting archive before uploading it. Never publish a host game's
 configuration, content, binaries, or repository history with the SDK.
 
-Keep [SDK_CONTRACT.md](SDK_CONTRACT.md) identical to the Unity SDK copy. Update both implementations and observable regression tests when changing shared behavior. Follow Epic's [plugin module guidance](https://dev.epicgames.com/documentation/en-us/unreal-engine/plugins-in-unreal-engine).
+Change shared behavior in the published SDK contract first, with a scenario that shows it, then update the SDK and its observable regression tests. Follow Epic's [plugin module guidance](https://dev.epicgames.com/documentation/en-us/unreal-engine/plugins-in-unreal-engine).

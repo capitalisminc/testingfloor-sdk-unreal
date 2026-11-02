@@ -1,0 +1,39 @@
+{
+  "format": 1,
+  "kind": "lifecycle",
+  "summary": "A recording that closes while a batch is failing sends its completion marker only after the retry succeeds, in its own request.",
+  "covers": ["Recording delivery completion", "Event capture and properties"],
+  "clock_start_unix_ms": 1767225600000,
+  "environment": "build",
+  "collector": "manual",
+  "steps": [
+    { "handoff": { "recording_uuid": "example-recording", "telemetry_directory": "{telemetry_directory}" } },
+    { "start": {} },
+    { "check": { "collecting": true, "recording_uuid": "example-recording", "files_exist": ["{play_session_id}.session"] } },
+    { "track": "gameplay", "accepted": true },
+    { "flush": {} },
+    { "create_file": "closed.json" },
+    { "poll": {} },
+    { "respond": 503 },
+    { "advance_ms": 60000 },
+    { "poll": {} },
+    { "respond": 200 },
+    { "poll": {} },
+    { "respond": 200 },
+    { "check": { "recording_uuid": null } },
+    { "track": "after_recording", "accepted": true },
+    { "flush": {} },
+    { "respond": 200 }
+  ],
+  "expect": {
+    "requests": [
+      { "events": [{ "$name": "gameplay", "$tf": { "recording_uuid": "example-recording" } }] },
+      { "repeats": 1, "events": [{ "$name": "gameplay", "$tf": { "recording_uuid": "example-recording" } }] },
+      {
+        "exclusive": true,
+        "events": [{ "$name": "$tf_telemetry_complete", "dropped_events": 0, "$session_id": "{play_session_id}", "$tf": { "recording_uuid": "example-recording" } }]
+      },
+      { "events": [{ "$name": "after_recording", "$tf": { "recording_uuid": null } }] }
+    ]
+  }
+}

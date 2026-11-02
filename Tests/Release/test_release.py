@@ -71,6 +71,11 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "omits the telemetry contract"):
             check_release.validate(self.root)
 
+    def test_unlisted_scenario_rejected(self):
+        (self.root / check_release.CONTRACT_DIR / "scenarios" / "unlisted.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "Contract copy and release manifest disagree"):
+            check_release.validate(self.root)
+
     def test_malformed_contract_rejected(self):
         (self.root / check_release.CONTRACT).write_text("{")
         with self.assertRaisesRegex(ValueError, "Telemetry contract is not valid JSON"):

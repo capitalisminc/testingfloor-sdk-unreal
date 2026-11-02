@@ -1,0 +1,181 @@
+{
+  "format": 1,
+  "kind": "handoff",
+  "summary": "Which recording an SDK picks from a launch argument and a sidecar, and when it picks none.",
+  "covers": ["Identity and recording", "Editor collection policy and dynamic recording"],
+  "clock_unix_ms": 1792411200789,
+  "cases": [
+    {
+      "name": "A launch argument alone supplies the recording, with the QR marker suppressed",
+      "launch_argument": { "recording_uuid": "example-launch" },
+      "expect": { "recording_uuid": "example-launch", "playtest_id": null, "suppress_qr": true }
+    },
+    {
+      "name": "The playtest ID and an explicit QR setting are kept",
+      "launch_argument": { "recording_uuid": "example-launch", "playtest_id": 42, "suppress_qr": false },
+      "expect": { "recording_uuid": "example-launch", "playtest_id": 42, "suppress_qr": false }
+    },
+    {
+      "name": "A valid launch argument wins over a sidecar without a lease",
+      "launch_argument": { "recording_uuid": "example-launch" },
+      "sidecar": { "recording_uuid": "example-sidecar" },
+      "expect": { "recording_uuid": "example-launch" }
+    },
+    {
+      "name": "A sidecar without a lease is used when there is no launch argument",
+      "sidecar": { "recording_uuid": "example-sidecar" },
+      "expect": { "recording_uuid": "example-sidecar" }
+    },
+    {
+      "name": "A malformed launch argument falls back to the sidecar",
+      "launch_argument": "invalid-json",
+      "sidecar": { "recording_uuid": "example-sidecar" },
+      "expect": { "recording_uuid": "example-sidecar" }
+    },
+    {
+      "name": "A launch argument older than 12 hours falls back to the sidecar",
+      "launch_argument": { "recording_uuid": "example-launch", "created_at_unix_ms": 1792368000788 },
+      "sidecar": { "recording_uuid": "example-sidecar" },
+      "expect": { "recording_uuid": "example-sidecar" }
+    },
+    {
+      "name": "A handoff exactly 12 hours old is still valid",
+      "launch_argument": { "recording_uuid": "example-launch", "created_at_unix_ms": 1792368000789 },
+      "expect": { "recording_uuid": "example-launch" }
+    },
+    {
+      "name": "A handoff one millisecond older than 12 hours is ignored",
+      "launch_argument": { "recording_uuid": "example-launch", "created_at_unix_ms": 1792368000788 },
+      "expect": null
+    },
+    {
+      "name": "A handoff without a recording UUID is ignored",
+      "launch_argument": { "playtest_id": 42 },
+      "sidecar": {},
+      "expect": null
+    },
+    {
+      "name": "A live lease keeps an old handoff valid",
+      "sidecar": {
+        "recording_uuid": "example-lease",
+        "created_at_unix_ms": 1792368000788,
+        "telemetry_directory": "/example/telemetry",
+        "lease_version": 1,
+        "telemetry_requested": true,
+        "lease_expires_at_unix_ms": 1792411205789
+      },
+      "expect": { "recording_uuid": "example-lease" }
+    },
+    {
+      "name": "An expired lease does not keep an old handoff valid",
+      "sidecar": {
+        "recording_uuid": "example-lease",
+        "created_at_unix_ms": 1792368000788,
+        "telemetry_directory": "/example/telemetry",
+        "lease_version": 1,
+        "telemetry_requested": true,
+        "lease_expires_at_unix_ms": 1792411200789
+      },
+      "expect": null
+    },
+    {
+      "name": "A lease that expires exactly 30 seconds ahead is live",
+      "sidecar": {
+        "recording_uuid": "example-lease",
+        "created_at_unix_ms": 1792368000788,
+        "telemetry_directory": "/example/telemetry",
+        "lease_version": 1,
+        "telemetry_requested": true,
+        "lease_expires_at_unix_ms": 1792411230789
+      },
+      "expect": { "recording_uuid": "example-lease" }
+    },
+    {
+      "name": "A lease that expires more than 30 seconds ahead is not live, so it does not keep an old handoff valid",
+      "sidecar": {
+        "recording_uuid": "example-lease",
+        "created_at_unix_ms": 1792368000788,
+        "telemetry_directory": "/example/telemetry",
+        "lease_version": 1,
+        "telemetry_requested": true,
+        "lease_expires_at_unix_ms": 1792411230790
+      },
+      "expect": null
+    },
+    {
+      "name": "A lease without telemetry_requested is not live, so it does not keep an old handoff valid",
+      "sidecar": {
+        "recording_uuid": "example-lease",
+        "created_at_unix_ms": 1792368000788,
+        "telemetry_directory": "/example/telemetry",
+        "lease_version": 1,
+        "telemetry_requested": false,
+        "lease_expires_at_unix_ms": 1792411205789
+      },
+      "expect": null
+    },
+    {
+      "name": "A lease without a telemetry directory is not live, so it does not keep an old handoff valid",
+      "sidecar": {
+        "recording_uuid": "example-lease",
+        "created_at_unix_ms": 1792368000788,
+        "lease_version": 1,
+        "telemetry_requested": true,
+        "lease_expires_at_unix_ms": 1792411205789
+      },
+      "expect": null
+    },
+    {
+      "name": "A lease sidecar wins over a launch argument even after the lease expires",
+      "launch_argument": { "recording_uuid": "example-launch" },
+      "sidecar": {
+        "recording_uuid": "example-lease",
+        "telemetry_directory": "/example/telemetry",
+        "lease_version": 1,
+        "telemetry_requested": true,
+        "lease_expires_at_unix_ms": 1792411199789
+      },
+      "expect": { "recording_uuid": "example-lease" }
+    },
+    {
+      "name": "In the editor, a handoff for another editor is ignored and the launch argument is used",
+      "editor_process_id": 100,
+      "launch_argument": { "recording_uuid": "example-launch" },
+      "sidecar": {
+        "recording_uuid": "example-lease",
+        "editor_pid": 200,
+        "telemetry_directory": "/example/telemetry",
+        "lease_version": 1,
+        "telemetry_requested": true,
+        "lease_expires_at_unix_ms": 1792411205789
+      },
+      "expect": { "recording_uuid": "example-launch" }
+    },
+    {
+      "name": "In the editor, a handoff for this editor is used",
+      "editor_process_id": 100,
+      "sidecar": {
+        "recording_uuid": "example-lease",
+        "editor_pid": 100,
+        "telemetry_directory": "/example/telemetry",
+        "lease_version": 1,
+        "telemetry_requested": true,
+        "lease_expires_at_unix_ms": 1792411205789
+      },
+      "expect": { "recording_uuid": "example-lease" }
+    },
+    {
+      "name": "A built game does not compare editor process IDs",
+      "editor_process_id": 0,
+      "sidecar": {
+        "recording_uuid": "example-lease",
+        "editor_pid": 200,
+        "telemetry_directory": "/example/telemetry",
+        "lease_version": 1,
+        "telemetry_requested": true,
+        "lease_expires_at_unix_ms": 1792411205789
+      },
+      "expect": { "recording_uuid": "example-lease" }
+    }
+  ]
+}

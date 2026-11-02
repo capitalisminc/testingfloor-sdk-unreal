@@ -1,0 +1,30 @@
+{
+  "format": 1,
+  "kind": "lifecycle",
+  "summary": "A Play run that cannot write to the telemetry directory still attaches, and still sends its completion marker when the recording closes.",
+  "covers": ["Recording delivery completion"],
+  "clock_start_unix_ms": 1767225600000,
+  "environment": "build",
+  "collector": "accept",
+  "requires": ["unwritable_directory"],
+  "steps": [
+    { "handoff": { "recording_uuid": "example-recording", "telemetry_directory": "{telemetry_directory}" } },
+    { "start": {} },
+    { "check": { "collecting": true, "recording_uuid": "example-recording", "files_absent": ["{play_session_id}.session"] } },
+    { "track": "gameplay", "accepted": true },
+    { "flush": {} },
+    { "create_file": "closed.json" },
+    { "poll": {} },
+    { "flush": {} },
+    { "check": { "recording_uuid": null } },
+    { "track": "after_recording", "accepted": true },
+    { "flush": {} }
+  ],
+  "expect": {
+    "events": [
+      { "$name": "gameplay", "$tf": { "recording_uuid": "example-recording" } },
+      { "$name": "$tf_telemetry_complete", "dropped_events": 0, "$tf": { "recording_uuid": "example-recording" } },
+      { "$name": "after_recording", "$tf": { "recording_uuid": null } }
+    ]
+  }
+}
