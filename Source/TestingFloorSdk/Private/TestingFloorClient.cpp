@@ -521,15 +521,25 @@ TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLi
 			return Recording;
 		}
 	}
+	const auto WithRenewableLease = [&ForThisEditor, Now](const FRecordingContext& Bootstrap) -> TOptional<FRecordingContext> {
+		if (Bootstrap.LeaseVersion != 0 || Bootstrap.TelemetryDirectory.IsEmpty()) return Bootstrap;
+		FString Json;
+		if (FFileHelper::LoadFileToString(Json, *(Bootstrap.TelemetryDirectory / TEXT("recording-payload.json"))))
+		{
+			const auto Lease = Parse(Json, Now);
+			if (ForThisEditor(Lease) && Lease->LeaseVersion != 0 && Lease->RecordingUUID == Bootstrap.RecordingUUID) return Lease;
+		}
+		return Bootstrap;
+	};
 	if (const auto Recording = FromCommandLine(CommandLine, Now); ForThisEditor(Recording))
 	{
-		return Recording;
+		return WithRenewableLease(Recording.GetValue());
 	}
 	for (const FString& Json : SidecarPayloads)
 	{
 		if (const auto Recording = Parse(Json, Now); ForThisEditor(Recording))
 		{
-			return Recording;
+			return WithRenewableLease(Recording.GetValue());
 		}
 	}
 	return {};
@@ -1473,6 +1483,8 @@ void FClient::UpdateRecordingContext(bool bForce)
 		Candidate = RecordingSource ? RecordingSource(Now) : Settings.Recording;
 		if (Candidate.IsSet() && (CompletedRecordings.Contains(Candidate->RecordingUUID) || RetiredHandoffs.Contains(Candidate->RecordingUUID))) Candidate.Reset();
 		if (!Candidate.IsSet() && LegacyRecordingFallback.IsSet() && !CompletedRecordings.Contains(LegacyRecordingFallback->RecordingUUID) && !RetiredHandoffs.Contains(LegacyRecordingFallback->RecordingUUID)) Candidate = LegacyRecordingFallback;
+		if (Candidate.IsSet() && Settings.Recording.IsSet() && Candidate->RecordingUUID == Settings.Recording->RecordingUUID
+			&& Candidate->LeaseVersion == 0 && Settings.Recording->LeaseVersion != 0) Candidate = Settings.Recording;
 		ObserveRecordingHandoff(Candidate, Now);
 		if (Candidate.IsSet() && Settings.Recording.IsSet() && Candidate->RecordingUUID == Settings.Recording->RecordingUUID && !bRecordingClosed)
 		{
