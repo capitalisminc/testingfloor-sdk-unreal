@@ -1053,4 +1053,40 @@ bool FTestingFloorBuiltRecordingOnlyTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorInitiallyPausedBuiltLeaseTest, "TestingFloor.Sdk.BuiltGameInitiallyPausedLease", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorInitiallyPausedBuiltLeaseTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorRecordingTests;
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*Directory, false, true); };
+	for (const bool bRecordingOnly : { false, true })
+	{
+		FDateTime Now(2026, 1, 1);
+		auto Paused = Lease(TEXT("example-paused"), Directory, Now);
+		Paused.bTelemetryRequested = false;
+		const FString Path = Directory / TEXT("recording-payload.json");
+		TF_REQUIRE_TRUE(FFileHelper::SaveStringToFile(LeaseJson(Paused), *Path), "Publish initially paused capture");
+		auto Bootstrap = Paused;
+		Bootstrap.LeaseVersion = 0;
+		const FString CommandLine = TEXT("--testing-floor=") + LeaseJson(Bootstrap);
+		auto Config = Settings();
+		Config.bRecordingOnly = bRecordingOnly;
+		const auto Client = TestingFloor::FClient::Create(Config, {}, MakeShared<FCapturingTransport>(), [&Now] { return Now; }, [&CommandLine](FDateTime At) { return TestingFloor::FRecordingContext::Resolve(CommandLine, {}, At); });
+		TF_REQUIRE_TRUE(Client->GetRecordingHandoff().IsSet(), "Paused capture is still observed");
+		TestFalse(TEXT("Paused lease is not attached for event tagging"), Client->GetRecordingContext().IsSet());
+		IFileManager::Get().Delete(*Path);
+		Now += FTimespan::FromMilliseconds(250);
+		Client->PollRecordingContext();
+		TF_REQUIRE_TRUE(Client->GetRecordingHandoff().IsSet(), "Last paused lease remains observed until expiry");
+		TestEqual(TEXT("Missing file cannot downgrade an observed unattached lease"), Client->GetRecordingHandoff()->LeaseVersion, 1);
+		TestFalse(TEXT("Missing file cannot attach the legacy hint"), Client->GetRecordingContext().IsSet());
+		Now += FTimespan::FromSeconds(6);
+		Client->PollRecordingContext();
+		TestFalse(TEXT("Expired observed lease cannot suppress QR forever"), Client->GetRecordingHandoff().IsSet());
+		Client->Shutdown(0.0);
+	}
+	return true;
+}
+
 #endif

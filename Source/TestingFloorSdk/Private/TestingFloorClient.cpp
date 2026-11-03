@@ -1483,8 +1483,9 @@ void FClient::UpdateRecordingContext(bool bForce)
 		Candidate = RecordingSource ? RecordingSource(Now) : Settings.Recording;
 		if (Candidate.IsSet() && (CompletedRecordings.Contains(Candidate->RecordingUUID) || RetiredHandoffs.Contains(Candidate->RecordingUUID))) Candidate.Reset();
 		if (!Candidate.IsSet() && LegacyRecordingFallback.IsSet() && !CompletedRecordings.Contains(LegacyRecordingFallback->RecordingUUID) && !RetiredHandoffs.Contains(LegacyRecordingFallback->RecordingUUID)) Candidate = LegacyRecordingFallback;
-		if (Candidate.IsSet() && Settings.Recording.IsSet() && Candidate->RecordingUUID == Settings.Recording->RecordingUUID
-			&& Candidate->LeaseVersion == 0 && Settings.Recording->LeaseVersion != 0) Candidate = Settings.Recording;
+		const auto& Previous = Settings.Recording.IsSet() && Settings.Recording->LeaseVersion != 0 ? Settings.Recording : DiscoveredRecording;
+		if (Candidate.IsSet() && Previous.IsSet() && Candidate->RecordingUUID == Previous->RecordingUUID
+			&& Candidate->LeaseVersion == 0 && Previous->LeaseVersion != 0) Candidate = Previous;
 		ObserveRecordingHandoff(Candidate, Now);
 		if (Candidate.IsSet() && Settings.Recording.IsSet() && Candidate->RecordingUUID == Settings.Recording->RecordingUUID && !bRecordingClosed)
 		{
