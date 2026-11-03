@@ -87,7 +87,10 @@ FString DecodeWindowsQuotes(const FString& Text)
 	return Result;
 }
 
-TOptional<FRecordingContext> ParseCommandLineValue(const FString& Value, FDateTime Now)
+TOptional<FRecordingContext> ParseRecordingPayload(const FString& Json, FDateTime Now, bool bAllowStale = false);
+TOptional<FRecordingContext> RecordingFromCommandLine(const FString& CommandLine, FDateTime Now, bool bAllowStale);
+
+TOptional<FRecordingContext> ParseCommandLineValue(const FString& Value, FDateTime Now, bool bAllowStale = false)
 {
 	int32 Start = 0;
 	while (Start < Value.Len() && (FChar::IsWhitespace(Value[Start]) || Value[Start] == TEXT('"') || Value[Start] == TEXT('\'')))
@@ -135,7 +138,7 @@ TOptional<FRecordingContext> ParseCommandLineValue(const FString& Value, FDateTi
 			{
 				return {};
 			}
-			return FRecordingContext::Parse(Value.Mid(Start, Index - Start + 1), Now);
+			return ParseRecordingPayload(Value.Mid(Start, Index - Start + 1), Now, bAllowStale);
 		}
 	}
 	return {};
@@ -408,7 +411,7 @@ TOptional<FRecordingContext> FRecordingContext::Discover(FDateTime Now)
 	return Resolve(FCommandLine::Get(), Payloads, Now, GIsEditor ? CurrentProcessID : 0);
 }
 
-TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDateTime Now)
+TOptional<FRecordingContext> Private::ParseRecordingPayload(const FString& Json, FDateTime Now, bool bAllowStale)
 {
 	TSharedPtr<FJsonObject> Object;
 	if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Object) || !Object.IsValid())
@@ -429,7 +432,7 @@ TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDate
 	Object->TryGetBoolField(TEXT("telemetry_requested"), Result.bTelemetryRequested);
 	int64 CreatedAt = 0;
 	const int64 NowMilliseconds = Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond();
-	if (!Result.HasActiveLease(Now) && Object->TryGetNumberField(TEXT("created_at_unix_ms"), CreatedAt) && CreatedAt > 0
+	if (!bAllowStale && !Result.HasActiveLease(Now) && Object->TryGetNumberField(TEXT("created_at_unix_ms"), CreatedAt) && CreatedAt > 0
 		&& CreatedAt < NowMilliseconds - 12LL * 60 * 60 * 1000)
 	{
 		return {};
@@ -443,7 +446,17 @@ TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDate
 	return Result;
 }
 
+TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDateTime Now)
+{
+	return Private::ParseRecordingPayload(Json, Now);
+}
+
 TOptional<FRecordingContext> FRecordingContext::FromCommandLine(const FString& CommandLine, FDateTime Now)
+{
+	return Private::RecordingFromCommandLine(CommandLine, Now, false);
+}
+
+TOptional<FRecordingContext> Private::RecordingFromCommandLine(const FString& CommandLine, FDateTime Now, bool bAllowStale)
 {
 	const FString Prefix = TEXT("--testing-floor=");
 	int32 Index = 0;
@@ -461,11 +474,11 @@ TOptional<FRecordingContext> FRecordingContext::FromCommandLine(const FString& C
 		if (CommandLine.Mid(ArgumentStart, Prefix.Len()) == Prefix)
 		{
 			const FString Value = CommandLine.Mid(ArgumentStart + Prefix.Len());
-			if (const auto Recording = Private::ParseCommandLineValue(Value, Now); Recording.IsSet())
+			if (const auto Recording = Private::ParseCommandLineValue(Value, Now, bAllowStale); Recording.IsSet())
 			{
 				return Recording;
 			}
-			return Private::ParseCommandLineValue(Private::DecodeWindowsQuotes(Value), Now);
+			return Private::ParseCommandLineValue(Private::DecodeWindowsQuotes(Value), Now, bAllowStale);
 		}
 		TCHAR Quote = 0;
 		while (Index < CommandLine.Len())
@@ -522,24 +535,29 @@ TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLi
 		}
 	}
 	const auto WithRenewableLease = [&ForThisEditor, Now](const FRecordingContext& Bootstrap) -> TOptional<FRecordingContext> {
-		if (Bootstrap.LeaseVersion != 0 || Bootstrap.TelemetryDirectory.IsEmpty()) return Bootstrap;
+		if (Bootstrap.TelemetryDirectory.IsEmpty()) return {};
 		FString Json;
 		if (FFileHelper::LoadFileToString(Json, *(Bootstrap.TelemetryDirectory / TEXT("recording-payload.json"))))
 		{
-			const auto Lease = Parse(Json, Now);
+			const auto Lease = Private::ParseRecordingPayload(Json, Now, true);
 			if (ForThisEditor(Lease) && Lease->LeaseVersion != 0 && Lease->RecordingUUID == Bootstrap.RecordingUUID) return Lease;
 		}
-		return Bootstrap;
+		return {};
 	};
+	if (const auto Locator = Private::RecordingFromCommandLine(CommandLine, Now, true); ForThisEditor(Locator))
+	{
+		if (const auto Lease = WithRenewableLease(Locator.GetValue()); Lease.IsSet()) return Lease;
+	}
 	if (const auto Recording = FromCommandLine(CommandLine, Now); ForThisEditor(Recording))
 	{
-		return WithRenewableLease(Recording.GetValue());
+		return Recording;
 	}
 	for (const FString& Json : SidecarPayloads)
 	{
 		if (const auto Recording = Parse(Json, Now); ForThisEditor(Recording))
 		{
-			return WithRenewableLease(Recording.GetValue());
+			if (const auto Lease = WithRenewableLease(Recording.GetValue()); Lease.IsSet()) return Lease;
+			return Recording;
 		}
 	}
 	return {};

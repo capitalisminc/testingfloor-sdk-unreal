@@ -1001,33 +1001,36 @@ bool FTestingFloorBuiltRecordingOnlyTest::RunTest(const FString& Parameters)
 	using namespace TestingFloorRecordingTests;
 	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
 	ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*Directory, false, true); };
+	for (const int32 LaunchLeaseVersion : { 0, 1 })
+	{
 	FDateTime Now(2026, 1, 1);
 	auto Current = Lease(TEXT("example-recording"), Directory, Now);
 	const FString Path = Directory / TEXT("recording-payload.json");
 	auto Bootstrap = Current;
-	Bootstrap.LeaseVersion = 0;
-	const FString CommandLine = TEXT("--testing-floor=") + LeaseJson(Bootstrap);
+	Bootstrap.LeaseVersion = LaunchLeaseVersion;
+	const FString CommandLine = TEXT("--testing-floor=") + LeaseJson(Bootstrap).LeftChop(1) + FString::Printf(TEXT(",\"created_at_unix_ms\":%lld}"), Now.ToUnixTimestamp() * 1000);
 	const auto Write = [&] { Current.LeaseExpiresAtUnixMilliseconds = Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond() + 5000; return FFileHelper::SaveStringToFile(LeaseJson(Current), *Path); };
 	const auto Poll = [&Now](const TSharedPtr<TestingFloor::FClient>& Client) { Now += FTimespan::FromMilliseconds(250); Client->PollRecordingContext(); };
 	auto Config = Settings();
 	Config.bRecordingOnly = true;
 	const auto Transport = MakeShared<FCapturingTransport>();
 	const auto Client = TestingFloor::FClient::Create(Config, {}, Transport, [&Now] { return Now; }, [&CommandLine](FDateTime At) { return TestingFloor::FRecordingContext::Resolve(CommandLine, {}, At); });
-	TestFalse(TEXT("Launch metadata alone cannot enable collection"), Client->IsCollecting());
+	TestEqual(TEXT("Only a live versioned launch initially collects"), Client->IsCollecting(), LaunchLeaseVersion == 1);
 	TestTrue(TEXT("Dormant objects can register"), Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }) != 0);
 	Current.RecordingUUID = TEXT("other-capture");
 	TF_REQUIRE_TRUE(Write(), "Publish mismatched owner");
 	Poll(Client);
-	TestFalse(TEXT("Another capture cannot renew this launch"), Client->IsCollecting());
+	TestEqual(TEXT("Another capture cannot renew this launch"), Client->IsCollecting(), LaunchLeaseVersion == 1);
 	Current.RecordingUUID = Bootstrap.RecordingUUID;
 	TF_REQUIRE_TRUE(Write(), "Publish active lease");
 	Poll(Client);
 	TestTrue(TEXT("The real file activates a built game"), Client->IsCollecting());
+	Client->Tick(0.0);
 	TestTrue(TEXT("Dormant objects join recording"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_objects"); }));
-	Now += FTimespan::FromSeconds(6);
+	Now += FTimespan::FromHours(13);
 	TF_REQUIRE_TRUE(Write(), "Renew beyond launch-time expiry");
 	Poll(Client);
-	TestTrue(TEXT("Renewal survives launch-time expiry"), Client->IsCollecting());
+	TestTrue(TEXT("Fresh matching file is discoverable after launch hint ages out"), Client->IsCollecting());
 	Current.bTelemetryRequested = false;
 	TF_REQUIRE_TRUE(Write(), "Publish paused lease");
 	Poll(Client);
@@ -1050,6 +1053,8 @@ bool FTestingFloorBuiltRecordingOnlyTest::RunTest(const FString& Parameters)
 	Poll(Client);
 	TestFalse(TEXT("Closed capture stops collection"), Client->IsCollecting());
 	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	}
 	return true;
 }
 
