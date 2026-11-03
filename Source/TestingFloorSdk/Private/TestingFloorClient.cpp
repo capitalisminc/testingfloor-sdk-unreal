@@ -87,7 +87,10 @@ FString DecodeWindowsQuotes(const FString& Text)
 	return Result;
 }
 
-TOptional<FRecordingContext> ParseCommandLineValue(const FString& Value, FDateTime Now)
+TOptional<FRecordingContext> ParseRecordingPayload(const FString& Json, FDateTime Now, bool bAllowStale = false);
+TOptional<FRecordingContext> RecordingFromCommandLine(const FString& CommandLine, FDateTime Now, bool bAllowStale);
+
+TOptional<FRecordingContext> ParseCommandLineValue(const FString& Value, FDateTime Now, bool bAllowStale = false)
 {
 	int32 Start = 0;
 	while (Start < Value.Len() && (FChar::IsWhitespace(Value[Start]) || Value[Start] == TEXT('"') || Value[Start] == TEXT('\'')))
@@ -135,7 +138,7 @@ TOptional<FRecordingContext> ParseCommandLineValue(const FString& Value, FDateTi
 			{
 				return {};
 			}
-			return FRecordingContext::Parse(Value.Mid(Start, Index - Start + 1), Now);
+			return ParseRecordingPayload(Value.Mid(Start, Index - Start + 1), Now, bAllowStale);
 		}
 	}
 	return {};
@@ -190,10 +193,10 @@ TOptional<FVector> FinitePosition(const TOptional<FVector>& Position)
 }
 
 /** Native centimeters rounded to 1 cm, without a negative zero. */
-TSharedPtr<FJsonValue> Centimeters(double Value)
+double QuantizedCentimeters(double Value)
 {
 	const double Rounded = FMath::RoundToDouble(Value);
-	return MakeShared<FJsonValueNumber>(Rounded == 0.0 ? 0.0 : Rounded);
+	return Rounded == 0.0 ? 0.0 : Rounded;
 }
 
 /** A JSON string's wire size: UTF-8 bytes, quotes and separator, and escapes. */
@@ -397,6 +400,11 @@ bool FRecordingContext::HasActiveLease(FDateTime Now) const
 
 TOptional<FRecordingContext> FRecordingContext::Discover(FDateTime Now)
 {
+	return DiscoverWithPrevious(Now, {});
+}
+
+TOptional<FRecordingContext> FRecordingContext::DiscoverWithPrevious(FDateTime Now, const TOptional<FRecordingContext>& Previous)
+{
 	// Interactive editors compare editor_pid; standalone child Play is project-scoped.
 	static const int64 CurrentProcessID = FPlatformProcess::GetCurrentProcessId();
 	FString Sidecar;
@@ -405,10 +413,10 @@ TOptional<FRecordingContext> FRecordingContext::Discover(FDateTime Now)
 	{
 		Payloads.Add(MoveTemp(Sidecar));
 	}
-	return Resolve(FCommandLine::Get(), Payloads, Now, GIsEditor ? CurrentProcessID : 0);
+	return ResolveWithPrevious(FCommandLine::Get(), Payloads, Now, GIsEditor ? CurrentProcessID : 0, Previous);
 }
 
-TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDateTime Now)
+TOptional<FRecordingContext> Private::ParseRecordingPayload(const FString& Json, FDateTime Now, bool bAllowStale)
 {
 	TSharedPtr<FJsonObject> Object;
 	if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Object) || !Object.IsValid())
@@ -429,7 +437,7 @@ TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDate
 	Object->TryGetBoolField(TEXT("telemetry_requested"), Result.bTelemetryRequested);
 	int64 CreatedAt = 0;
 	const int64 NowMilliseconds = Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond();
-	if (!Result.HasActiveLease(Now) && Object->TryGetNumberField(TEXT("created_at_unix_ms"), CreatedAt) && CreatedAt > 0
+	if (!bAllowStale && !Result.HasActiveLease(Now) && Object->TryGetNumberField(TEXT("created_at_unix_ms"), CreatedAt) && CreatedAt > 0
 		&& CreatedAt < NowMilliseconds - 12LL * 60 * 60 * 1000)
 	{
 		return {};
@@ -443,7 +451,17 @@ TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDate
 	return Result;
 }
 
+TOptional<FRecordingContext> FRecordingContext::Parse(const FString& Json, FDateTime Now)
+{
+	return Private::ParseRecordingPayload(Json, Now);
+}
+
 TOptional<FRecordingContext> FRecordingContext::FromCommandLine(const FString& CommandLine, FDateTime Now)
+{
+	return Private::RecordingFromCommandLine(CommandLine, Now, false);
+}
+
+TOptional<FRecordingContext> Private::RecordingFromCommandLine(const FString& CommandLine, FDateTime Now, bool bAllowStale)
 {
 	const FString Prefix = TEXT("--testing-floor=");
 	int32 Index = 0;
@@ -461,11 +479,11 @@ TOptional<FRecordingContext> FRecordingContext::FromCommandLine(const FString& C
 		if (CommandLine.Mid(ArgumentStart, Prefix.Len()) == Prefix)
 		{
 			const FString Value = CommandLine.Mid(ArgumentStart + Prefix.Len());
-			if (const auto Recording = Private::ParseCommandLineValue(Value, Now); Recording.IsSet())
+			if (const auto Recording = Private::ParseCommandLineValue(Value, Now, bAllowStale); Recording.IsSet())
 			{
 				return Recording;
 			}
-			return Private::ParseCommandLineValue(Private::DecodeWindowsQuotes(Value), Now);
+			return Private::ParseCommandLineValue(Private::DecodeWindowsQuotes(Value), Now, bAllowStale);
 		}
 		TCHAR Quote = 0;
 		while (Index < CommandLine.Len())
@@ -507,6 +525,11 @@ TOptional<FRecordingContext> FRecordingContext::FromCommandLine(const FString& C
 
 TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now, int64 EditorProcessID)
 {
+	return ResolveWithPrevious(CommandLine, SidecarPayloads, Now, EditorProcessID, {});
+}
+
+TOptional<FRecordingContext> FRecordingContext::ResolveWithPrevious(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now, int64 EditorProcessID, const TOptional<FRecordingContext>& Previous)
+{
 	// A handoff that names another editor belongs to that editor, whichever source carries it, and
 	// cannot hide this editor's own handoff.
 	const auto ForThisEditor = [EditorProcessID](const TOptional<FRecordingContext>& Recording) {
@@ -521,6 +544,22 @@ TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLi
 			return Recording;
 		}
 	}
+	const auto WithRenewableLease = [&ForThisEditor, Now](const FRecordingContext& Bootstrap) -> TOptional<FRecordingContext> {
+		if (Bootstrap.TelemetryDirectory.IsEmpty()) return {};
+		FString Json;
+		if (FFileHelper::LoadFileToString(Json, *(Bootstrap.TelemetryDirectory / TEXT("recording-payload.json"))))
+		{
+			const auto Lease = Private::ParseRecordingPayload(Json, Now, true);
+			if (ForThisEditor(Lease) && Lease->LeaseVersion != 0 && Lease->RecordingUUID == Bootstrap.RecordingUUID) return Lease;
+		}
+		return {};
+	};
+	if (const auto Locator = Private::RecordingFromCommandLine(CommandLine, Now, true); ForThisEditor(Locator))
+	{
+		if (const auto Lease = WithRenewableLease(Locator.GetValue()); Lease.IsSet()) return Lease;
+		if (Previous.IsSet() && Previous->LeaseVersion != 0 && Previous->RecordingUUID == Locator->RecordingUUID
+			&& Previous->TelemetryDirectory == Locator->TelemetryDirectory) return Previous;
+	}
 	if (const auto Recording = FromCommandLine(CommandLine, Now); ForThisEditor(Recording))
 	{
 		return Recording;
@@ -529,15 +568,47 @@ TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLi
 	{
 		if (const auto Recording = Parse(Json, Now); ForThisEditor(Recording))
 		{
+			if (const auto Lease = WithRenewableLease(Recording.GetValue()); Lease.IsSet()) return Lease;
 			return Recording;
 		}
 	}
 	return {};
 }
 
+bool FCoordinateTransform::IsValid() const
+{
+	if (!bEnabled) return true;
+	TSet<int32> Used;
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		const int32 Axis = Axes[Index];
+		if (Axis < -3 || Axis > 3 || Axis == 0 || Used.Contains(FMath::Abs(Axis))) return false;
+		Used.Add(FMath::Abs(Axis));
+	}
+	return FMath::IsFinite(Scale) && Scale > 0.0 && !Offset.ContainsNaN();
+}
+
+FVector FCoordinateTransform::Direction(const FVector& Value) const
+{
+	if (!bEnabled) return Value;
+	FVector Result = FVector::ZeroVector;
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		const int32 Axis = Axes[Index];
+		Result[Index] = Value[FMath::Abs(Axis) - 1] * (Axis > 0 ? 1.0 : -1.0);
+	}
+	return Result;
+}
+
+FVector FCoordinateTransform::Point(const FVector& Value) const
+{
+	return bEnabled ? Direction(Value) * Scale + Offset : Value;
+}
+
 bool ShouldCollect(const FSettings& Settings, const FEnvironment& Environment, FDateTime Now)
 {
-	return Settings.bEnabled && !Environment.bAutomation
+	return Settings.bEnabled && !Environment.bAutomation && Settings.CoordinateTransform.IsValid()
+		&& (!Settings.bRecordingOnly || (Settings.Recording.IsSet() && Settings.Recording->HasActiveLease(Now)))
 		&& (!Environment.bEditor || Settings.bEnableInEditor
 			|| (Settings.bEnableInEditorWhileRecording && Settings.Recording.IsSet() && Settings.Recording->HasActiveLease(Now)))
 		&& !Settings.WriteKey.TrimStartAndEnd().IsEmpty() && !Settings.Endpoint.TrimStartAndEnd().IsEmpty();
@@ -558,7 +629,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 	Private::SetIfPresent(*Object, TEXT("$device_id"), Settings.DeviceID);
 	Private::SetIfPresent(*Object, TEXT("$user_id"), Settings.UserID);
 	const TSharedRef<FJsonObject> Platform = MakeShared<FJsonObject>();
-	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.7.0"));
+	Platform->SetStringField(TEXT("sdk_version"), TEXT("0.8.0"));
 	if (Event.Sequence > 0)
 	{
 		Platform->SetField(TEXT("seq"), MakeShared<FJsonValueNumberString>(LexToString(Event.Sequence)));
@@ -573,6 +644,7 @@ FString SerializeEvent(const FEvent& Event, const FSettings& Settings)
 		Platform->SetStringField(TEXT("engine"), TEXT("Unreal ") + Settings.EngineVersion.TrimStartAndEnd());
 	}
 	Private::SetIfPresent(*Platform, TEXT("app_version"), Settings.AppVersion);
+	Private::SetIfPresent(*Platform, TEXT("build_id"), Settings.BuildID);
 	Private::SetIfPresent(*Platform, TEXT("os"), Settings.OperatingSystem);
 	Private::SetIfPresent(*Platform, TEXT("locale"), Settings.Locale);
 	Private::SetIfPresent(*Platform, TEXT("device_model"), Settings.DeviceModel);
@@ -881,11 +953,14 @@ FClient::FClient(FSettings InSettings, FEnvironment InEnvironment, TSharedRef<IT
 	: Settings(MoveTemp(InSettings)), Environment(InEnvironment), RecordingSource(MoveTemp(InRecordingSource)), Transport(MoveTemp(InTransport)), Clock(MoveTemp(InClock))
 {
 	State = !Settings.bEnabled || Environment.bAutomation ? EState::Disabled
-		: Settings.WriteKey.TrimStartAndEnd().IsEmpty() || Settings.Endpoint.TrimStartAndEnd().IsEmpty() ? EState::NotConfigured : EState::Ok;
+		: !Settings.CoordinateTransform.IsValid() || Settings.WriteKey.TrimStartAndEnd().IsEmpty() || Settings.Endpoint.TrimStartAndEnd().IsEmpty() ? EState::NotConfigured : EState::Ok;
 	SessionID = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
 	if (!RecordingSource && !Environment.bAutomation)
 	{
-		RecordingSource = [](FDateTime Now) { return FRecordingContext::Discover(Now); };
+		RecordingSource = [this](FDateTime Now) {
+			const auto& Previous = Settings.Recording.IsSet() && Settings.Recording->LeaseVersion != 0 ? Settings.Recording : DiscoveredRecording;
+			return FRecordingContext::DiscoverWithPrevious(Now, Previous);
+		};
 	}
 	TOptional<FRecordingContext> Initial = Settings.Recording;
 	if (!Initial.IsSet() && RecordingSource) Initial = RecordingSource(Clock());
@@ -1013,6 +1088,12 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 		}
 		return false;
 	}
+	return TrackGameplay(Name, Properties);
+}
+
+bool FClient::TrackGameplay(const FString& Name, const FProperties& Properties)
+{
+	check(IsInGameThread());
 	UpdateRecordingContext(false);
 	if (!IsCollecting() || Name.TrimStartAndEnd().IsEmpty())
 	{
@@ -1050,6 +1131,7 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 		Event.ScreenSize = Sample->ViewportSize;
 	}
 	Event.Properties.Merge(Properties);
+	TransformProperties(Event.Properties);
 	if (EventProcessor)
 	{
 		EventProcessor(Event.Properties);
@@ -1073,6 +1155,33 @@ bool FClient::Track(const FString& Name, const FProperties& Properties)
 	}
 	LevelContext = MoveTemp(Level);
 	return true;
+}
+
+void FClient::TransformProperties(FProperties& Properties) const
+{
+	const FCoordinateTransform& Space = Settings.CoordinateTransform;
+	if (!Space.bEnabled) return;
+	const auto Number = [&Properties](const FString& Key, double& Out) {
+		const TSharedPtr<FJsonValue>* Value = Properties.GetValues().Find(Key);
+		return Value && Value->IsValid() && (*Value)->TryGetNumber(Out) && FMath::IsFinite(Out);
+	};
+	for (const TCHAR* Prefix : { TEXT("player.position"), TEXT("camera.position"), TEXT("camera.focus"), TEXT("teleport.start.position"), TEXT("teleport.end.position"), TEXT("camera.forward"), TEXT("camera.up") })
+	{
+		const FString Key(Prefix);
+		FVector Point;
+		if (!Number(Key + TEXT(".x"), Point.X) || !Number(Key + TEXT(".y"), Point.Y) || !Number(Key + TEXT(".z"), Point.Z)) continue;
+		const bool bDirection = Key == TEXT("camera.forward") || Key == TEXT("camera.up");
+		Properties.SetVector(Key, bDirection ? Space.Direction(Point) : Space.Point(Point));
+	}
+	// Legacy Unreal movement and teleport lengths are meters, while points and ortho width are centimeters.
+	for (const TCHAR* Key : { TEXT("movement.distance"), TEXT("movement.camera_distance"), TEXT("movement.ortho_width_delta"), TEXT("teleport.distance") })
+	{
+		double Value;
+		if (Number(Key, Value)) Properties.Set(Key, Value * 100.0 * Space.Scale);
+	}
+	double Width;
+	if (Number(TEXT("camera.ortho_width"), Width)) Properties.Set(TEXT("camera.ortho_width"), Width * Space.Scale);
+	for (const TCHAR* Axis : { TEXT("x"), TEXT("y"), TEXT("z") }) Properties.Remove(FString(TEXT("camera.euler.")) + Axis);
 }
 
 bool FClient::Enqueue(FEvent Record)
@@ -1267,9 +1376,10 @@ bool FClient::ConfigurationPermitted() const
 
 bool FClient::CollectionPermitted() const
 {
-	return !Environment.bEditor || Settings.bEnableInEditor
-		|| (Settings.bEnableInEditorWhileRecording && bRecordingRegistered && !bRecordingClosed && !bRecordingSuspended
-			&& Settings.Recording.IsSet() && Settings.Recording->HasActiveLease(Clock()));
+	const bool bActive = bRecordingRegistered && !bRecordingClosed && !bRecordingSuspended
+		&& Settings.Recording.IsSet() && Settings.Recording->HasActiveLease(Clock());
+	return (!Settings.bRecordingOnly || bActive)
+		&& (!Environment.bEditor || Settings.bEnableInEditor || (Settings.bEnableInEditorWhileRecording && bActive));
 }
 
 void FClient::WriteRecordingStatus(const FRecordingContext& Recording, const TCHAR* Status, const TCHAR* Reason)
@@ -1279,7 +1389,7 @@ void FClient::WriteRecordingStatus(const FRecordingContext& Recording, const TCH
 	Value->SetStringField(TEXT("recording_uuid"), Recording.RecordingUUID);
 	Value->SetStringField(TEXT("session_id"), SessionID);
 	Value->SetStringField(TEXT("engine"), TEXT("unreal"));
-	Value->SetStringField(TEXT("sdk_version"), TEXT("0.7.0"));
+	Value->SetStringField(TEXT("sdk_version"), TEXT("0.8.0"));
 	Value->SetStringField(TEXT("state"), Status);
 	Value->SetStringField(TEXT("reason"), Reason);
 	Value->SetBoolField(TEXT("interrupted"), bRecordingInterrupted);
@@ -1315,7 +1425,7 @@ bool FClient::AttachRecording(const FRecordingContext& Recording)
 	const TCHAR* Reason = !Settings.bEnabled ? TEXT("master_disabled") : Environment.bAutomation ? TEXT("automation")
 		: State == EState::NotConfigured ? TEXT("missing_configuration") : State == EState::Rejected ? TEXT("collector_rejected") : TEXT("editor_policy_disabled");
 	const bool bLease = Recording.LeaseVersion != 0;
-	const bool bPermission = ConfigurationPermitted() && (!Environment.bEditor || Settings.bEnableInEditor
+	const bool bPermission = ConfigurationPermitted() && (!Settings.bRecordingOnly || Recording.HasActiveLease(Clock())) && (!Environment.bEditor || Settings.bEnableInEditor
 		|| (Settings.bEnableInEditorWhileRecording && Recording.HasActiveLease(Clock())));
 	if (bLease && !Recording.HasActiveLease(Clock()))
 	{
@@ -1406,6 +1516,9 @@ void FClient::UpdateRecordingContext(bool bForce)
 		Candidate = RecordingSource ? RecordingSource(Now) : Settings.Recording;
 		if (Candidate.IsSet() && (CompletedRecordings.Contains(Candidate->RecordingUUID) || RetiredHandoffs.Contains(Candidate->RecordingUUID))) Candidate.Reset();
 		if (!Candidate.IsSet() && LegacyRecordingFallback.IsSet() && !CompletedRecordings.Contains(LegacyRecordingFallback->RecordingUUID) && !RetiredHandoffs.Contains(LegacyRecordingFallback->RecordingUUID)) Candidate = LegacyRecordingFallback;
+		const auto& Previous = Settings.Recording.IsSet() && Settings.Recording->LeaseVersion != 0 ? Settings.Recording : DiscoveredRecording;
+		if (Candidate.IsSet() && Previous.IsSet() && Candidate->RecordingUUID == Previous->RecordingUUID
+			&& Candidate->LeaseVersion == 0 && Previous->LeaseVersion != 0) Candidate = Previous;
 		ObserveRecordingHandoff(Candidate, Now);
 		if (Candidate.IsSet() && Settings.Recording.IsSet() && Candidate->RecordingUUID == Settings.Recording->RecordingUUID && !bRecordingClosed)
 		{
@@ -1735,7 +1848,7 @@ void FClient::EmitMovement(const TCHAR* Reason, double Distance, double Duration
 		Properties.Set(TEXT("movement.camera_distance"), CameraDistance);
 	if (OrthoWidth > 0.0)
 		Properties.Set(TEXT("movement.ortho_width_delta"), OrthoWidth);
-	Track(TEXT("player_moved"), Properties);
+	TrackGameplay(TEXT("$tf_player_moved"), Properties);
 }
 
 uint64 FClient::BeginTeleport(const FString& Reason)
@@ -1782,7 +1895,7 @@ void FClient::CancelTeleport(uint64 Token)
 
 void FClient::RecordTeleport(const FVector& StartCentimeters, const FVector& EndCentimeters, const FString& Reason, double DurationSeconds)
 {
-	Track(TEXT("player_teleported"), FProperties().Set(TEXT("teleport.kind"), TEXT("teleport")).SetIfPresent(TEXT("teleport.reason"), Reason).SetVector(TEXT("teleport.start.position"), StartCentimeters).SetVector(TEXT("teleport.end.position"), EndCentimeters).Set(TEXT("teleport.duration"), FMath::Max(0.0, DurationSeconds)).Set(TEXT("teleport.distance"), FVector::Distance(StartCentimeters, EndCentimeters) / 100.0));
+	TrackGameplay(TEXT("$tf_player_teleported"), FProperties().Set(TEXT("teleport.kind"), TEXT("teleport")).SetIfPresent(TEXT("teleport.reason"), Reason).SetVector(TEXT("teleport.start.position"), StartCentimeters).SetVector(TEXT("teleport.end.position"), EndCentimeters).Set(TEXT("teleport.duration"), FMath::Max(0.0, DurationSeconds)).Set(TEXT("teleport.distance"), FVector::Distance(StartCentimeters, EndCentimeters) / 100.0));
 	ResetMovement();
 }
 
@@ -2113,9 +2226,10 @@ void FClient::QueueObjectRecords(TArray<FObjectRows>& Rows, bool bKeyframe)
 			{
 				SampleIDs.Add(MakeShared<FJsonValueString>(Row.ID));
 				Kinds.Add(MakeShared<FJsonValueString>(Row.Kind));
-				X.Add(Private::Centimeters(Sample.X));
-				Y.Add(Private::Centimeters(Sample.Y));
-				Z.Add(Private::Centimeters(Sample.Z));
+				const FVector Output = Settings.CoordinateTransform.Point(FVector(Private::QuantizedCentimeters(Sample.X), Private::QuantizedCentimeters(Sample.Y), Private::QuantizedCentimeters(Sample.Z)));
+				X.Add(MakeShared<FJsonValueNumber>(Output.X));
+				Y.Add(MakeShared<FJsonValueNumber>(Output.Y));
+				Z.Add(MakeShared<FJsonValueNumber>(Output.Z));
 			}
 			for (const auto& Pair : Row.State)
 			{
@@ -2198,7 +2312,7 @@ FString FClient::GetCollectionReason() const
 	if (!Settings.bEnabled) return TEXT("master_disabled");
 	if (State == EState::NotConfigured) return TEXT("missing_configuration");
 	if (State == EState::Rejected) return TEXT("collector_rejected");
-	return TEXT("editor_policy_disabled");
+	return Settings.bRecordingOnly ? TEXT("recording_required") : TEXT("editor_policy_disabled");
 }
 
 void FClient::NotifyRecordingChanged()

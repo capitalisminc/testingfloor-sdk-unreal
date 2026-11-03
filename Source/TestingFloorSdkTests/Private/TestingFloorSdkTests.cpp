@@ -150,7 +150,7 @@ bool FTestingFloorPayloadTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("64-bit integer keeps exact wire precision"), Transport->Bodies[0].Contains(TEXT("9007199254740993")));
 	const TSharedPtr<FJsonObject>* Metadata = nullptr;
 	TF_REQUIRE_TRUE(Payload->TryGetObjectField(TEXT("$tf"), Metadata) && Metadata && Metadata->IsValid(), "SDK metadata object");
-	TestEqual(TEXT("SDK metadata"), (*Metadata)->GetStringField(TEXT("sdk_version")), FString(TEXT("0.7.0")));
+	TestEqual(TEXT("SDK metadata"), (*Metadata)->GetStringField(TEXT("sdk_version")), FString(TEXT("0.8.0")));
 	return true;
 }
 
@@ -216,7 +216,7 @@ bool FTestingFloorRetryTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Order preserved before later event"), Retried[1]->GetStringField(TEXT("$name")), FString(TEXT("puzzle_complete")));
 	TF_REQUIRE_TRUE(Transport->Complete(401, false), "Retry has completion callback");
 	TestEqual(TEXT("Revoked key disables session"), Client->GetState(), TestingFloor::EState::Rejected);
-	TestFalse(TEXT("Revoked session accepts no further events"), Client->Track(TEXT("player_moved")));
+	TestFalse(TEXT("Revoked session accepts no further events"), Client->Track(TEXT("$tf_player_moved")));
 	Client->Tick(60.0);
 	TestEqual(TEXT("No repeated auth attempts"), Transport->Bodies.Num(), 2);
 	const auto InvalidTransport = MakeShared<TestingFloorClientTests::FTransport>();
@@ -297,7 +297,7 @@ bool FTestingFloorMovementTeleportTest::RunTest(const FString& Parameters)
 	Client->EndTeleport(Teleport);
 	TF_REQUIRE_TRUE(Client->GetQueuedEvents().Num() == 4, "Teleport recorded once");
 	const auto& Event = Client->GetQueuedEvents().Last();
-	TestEqual(TEXT("Teleport event"), Event.Name, FString(TEXT("player_teleported")));
+	TestEqual(TEXT("Teleport event"), Event.Name, FString(TEXT("$tf_player_teleported")));
 	const auto* Distance = Event.Properties.GetValues().Find(TEXT("teleport.distance"));
 	TF_REQUIRE_TRUE(Distance && Distance->IsValid() && (*Distance)->Type == EJson::Number, "Teleport distance is a number");
 	TestEqual(TEXT("Teleport distance meters"), (*Distance)->AsNumber(), 100.0);
@@ -344,8 +344,8 @@ bool FTestingFloorOrthographicZoomTest::RunTest(const FString& Parameters)
 		Idle->Tick(Now);
 	}
 	TestEqual(TEXT("An orthographic camera's unused FOV is not movement"),
-		Idle->GetQueuedEvents().FilterByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("player_moved"); }).Num(), 0);
-	const auto Moves = Client->GetQueuedEvents().FilterByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("player_moved"); });
+		Idle->GetQueuedEvents().FilterByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_player_moved"); }).Num(), 0);
+	const auto Moves = Client->GetQueuedEvents().FilterByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_player_moved"); });
 	TF_REQUIRE_TRUE(Moves.Num() == 3, "Zooming alone produces start, ping, stop");
 	const auto Delta = [](const TestingFloor::FEvent& Event)
 	{
@@ -399,6 +399,55 @@ bool FTestingFloorBodyCapTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Collector byte cap splits batch before 1 MiB"), FTCHARToUTF8(*Body).Length() < 1024 * 1024);
 	TF_REQUIRE_TRUE(Consumed > 0 && Consumed < Events.Num(), "Remaining events retained for later batch");
 	TestEqual(TEXT("Consumed count equals valid serialized events"), TestingFloorClientTests::ParseEvents(Body).Num(), Consumed);
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorOutputSpaceTest, "TestingFloor.Sdk.OutputSpace", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorOutputSpaceTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorClientTests;
+	auto Config = Settings();
+	Config.BuildID = TEXT("example-build");
+	Config.CoordinateTransform.bEnabled = true;
+	Config.CoordinateTransform.Axes = FIntVector(2, -1, 3);
+	Config.CoordinateTransform.Scale = 0.01;
+	Config.CoordinateTransform.Offset = FVector(10, 20, 30);
+	Config.FlushIntervalSeconds = 1000000;
+	const auto Client = TestingFloor::FClient::Create(Config, {}, MakeShared<FTransport>());
+	Client->SetActivitySource([] {
+		TestingFloor::FActivitySample Sample;
+		Sample.PlayerPosition = FVector(200, 100, 300);
+		Sample.CameraRotation = FQuat::Identity;
+		return Sample;
+	});
+	double Observed = 0;
+	Client->SetEventProcessor([&Observed](TestingFloor::FProperties& Properties) { Observed = Properties.GetValues().FindRef(TEXT("player.position.x"))->AsNumber(); });
+	Client->Track(TEXT("example"), TestingFloor::FProperties().Set(TEXT("camera.ortho_width"), 400.0).Set(TEXT("custom.position.x"), 99.0));
+	TestEqual(TEXT("Processor sees output coordinates"), Observed, 11.0);
+	const TestingFloor::FEvent* Event = Client->GetQueuedEvents().FindByPredicate([](const TestingFloor::FEvent& Item) { return Item.Name == TEXT("example"); });
+	TF_REQUIRE(Event, "Example event queued");
+	const auto Wire = Parse(TestingFloor::SerializeEvent(*Event, Config));
+	TestEqual(TEXT("Y uses signed axis and offset"), Wire->GetNumberField(TEXT("player.position.y")), 18.0);
+	TestEqual(TEXT("Z uses output units"), Wire->GetNumberField(TEXT("player.position.z")), 33.0);
+	TestEqual(TEXT("Directions ignore scale and offset"), Wire->GetNumberField(TEXT("camera.forward.y")), -1.0);
+	TestEqual(TEXT("Ortho width uses native centimeters before scale"), Wire->GetNumberField(TEXT("camera.ortho_width")), 4.0);
+	TestEqual(TEXT("Custom properties pass through"), Wire->GetNumberField(TEXT("custom.position.x")), 99.0);
+	TestFalse(TEXT("Euler angles stay out of converted space"), Wire->HasField(TEXT("camera.euler.x")));
+	TestEqual(TEXT("Build identity is separate context"), Wire->GetObjectField(TEXT("$tf"))->GetStringField(TEXT("build_id")), FString(TEXT("example-build")));
+	Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector(200, 100, 300)); });
+	Client->Tick(0.0);
+	const TestingFloor::FEvent* Objects = Client->GetQueuedEvents().FindByPredicate([](const TestingFloor::FEvent& Item) { return Item.Name == TEXT("$tf_objects"); });
+	TF_REQUIRE(Objects, "Objects queued");
+	TestEqual(TEXT("Object samples align with event points"), Objects->Properties.GetValues().FindRef(TEXT("sample.x"))->AsArray()[0]->AsNumber(), 11.0);
+	Client->RecordTeleport(FVector::ZeroVector, FVector(300, 400, 0), TEXT("respawn"));
+	const TestingFloor::FEvent* Teleport = Client->GetQueuedEvents().FindByPredicate([](const TestingFloor::FEvent& Item) { return Item.Name == TEXT("$tf_player_teleported"); });
+	TF_REQUIRE(Teleport, "Namespaced automatic teleport queued");
+	TestEqual(TEXT("Legacy meter length converts back through centimeters"), Teleport->Properties.GetValues().FindRef(TEXT("teleport.distance"))->AsNumber(), 5.0);
+	TestTrue(TEXT("Legacy game-owned names remain accepted"), Client->Track(TEXT("player_moved")));
+	Config.CoordinateTransform.Axes = FIntVector(1, 1, 3);
+	TestFalse(TEXT("Invalid output space disables collection"), TestingFloor::ShouldCollect(Config, {}));
+	TestFalse(TEXT("Invalid space client refuses events"), TestingFloor::FClient::Create(Config, {}, MakeShared<FTransport>())->Track(TEXT("example")));
 	return true;
 }
 

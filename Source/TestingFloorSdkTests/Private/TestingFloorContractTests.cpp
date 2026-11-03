@@ -491,7 +491,7 @@ bool FTestingFloorContractRecordsTest::RunTest(const FString& Parameters)
 	for (const TSharedPtr<FJsonObject>& Record : Run.Records)
 	{
 		const FString Name = Field(*Record, TEXT("$name"));
-		if (Name.StartsWith(TEXT("$")))
+		if (Name.StartsWith(TEXT("$")) && Name != TEXT("$tf_player_moved") && Name != TEXT("$tf_player_teleported"))
 		{
 			RecordNames.Add(Name);
 		}
@@ -578,7 +578,7 @@ bool FTestingFloorContractPropertiesTest::RunTest(const FString& Parameters)
 	for (const TSharedPtr<FJsonObject>& Record : Records)
 	{
 		const FString Name = Field(*Record, TEXT("$name"));
-		if (!Name.StartsWith(TEXT("$")))
+		if (Events.Contains(Name))
 		{
 			EventNames.Add(Name);
 		}
@@ -605,7 +605,7 @@ bool FTestingFloorContractPropertiesTest::RunTest(const FString& Parameters)
 			}
 			else
 			{
-				TestFalse(FString::Printf(TEXT("%s is sent on events, not on %s"), *Key, *Name), Name.StartsWith(TEXT("$")));
+				TestFalse(FString::Printf(TEXT("%s is sent on events, not on %s"), *Key, *Name), Name.StartsWith(TEXT("$")) && !Events.Contains(Name));
 			}
 		}
 		TestTypes(*this, Name, *Record, Types);

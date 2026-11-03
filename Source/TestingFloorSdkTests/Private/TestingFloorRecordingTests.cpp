@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/CommandLine.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformProcess.h"
@@ -640,7 +641,7 @@ bool FTestingFloorTeleportRecordingBoundaryTest::RunTest(const FString& Paramete
 	const int32 ReadsBeforeOldEnd = PositionReads;
 	Client->EndTeleport(AToken);
 	TestEqual(TEXT("Old scope cannot sample in a new recording"), PositionReads, ReadsBeforeOldEnd);
-	TestFalse(TEXT("A teleport cannot carry pre-recording positions into B"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("player_teleported"); }));
+	TestFalse(TEXT("A teleport cannot carry pre-recording positions into B"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_player_teleported"); }));
 	Client->Shutdown(0.0);
 	IFileManager::Get().DeleteDirectory(*Directory, false, true);
 	return true;
@@ -990,6 +991,132 @@ bool FTestingFloorEditorProcessScopeTest::RunTest(const FString& Parameters)
 		TF_REQUIRE_TRUE(Payload.Write(Lease(TEXT("this-editor"), Current)), "Rewrite the handoff for this editor");
 		const auto Discovered = TestingFloor::FRecordingContext::Discover(Now);
 		TestTrue(TEXT("Discovery accepts this editor's handoff file"), Discovered.IsSet() && Discovered->RecordingUUID == TEXT("this-editor"));
+	}
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorBuiltRecordingOnlyTest, "TestingFloor.Sdk.BuiltGameRecordingOnly", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorBuiltRecordingOnlyTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorRecordingTests;
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*Directory, false, true); };
+	for (const int32 LaunchLeaseVersion : { 0, 1 })
+	{
+	FDateTime Now(2026, 1, 1);
+	auto Current = Lease(TEXT("example-recording"), Directory, Now);
+	const FString Path = Directory / TEXT("recording-payload.json");
+	auto Bootstrap = Current;
+	Bootstrap.LeaseVersion = LaunchLeaseVersion;
+	const FString CommandLine = TEXT("--testing-floor=") + LeaseJson(Bootstrap).LeftChop(1) + FString::Printf(TEXT(",\"created_at_unix_ms\":%lld}"), Now.ToUnixTimestamp() * 1000);
+	const FString OriginalCommandLine = FCommandLine::Get();
+	FCommandLine::Set(*CommandLine);
+	ON_SCOPE_EXIT { FCommandLine::Set(*OriginalCommandLine); };
+	FScopedProjectHandoff ProjectPayload;
+	TF_REQUIRE_TRUE(ProjectPayload.Write(TEXT("{}")), "Isolate editor-sidecar precedence");
+	const auto Write = [&] { Current.LeaseExpiresAtUnixMilliseconds = Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond() + 5000; return FFileHelper::SaveStringToFile(LeaseJson(Current), *Path); };
+	const auto Poll = [&Now](const TSharedPtr<TestingFloor::FClient>& Client) { Now += FTimespan::FromMilliseconds(250); Client->PollRecordingContext(); };
+	auto Config = Settings();
+	Config.bRecordingOnly = true;
+	const auto Transport = MakeShared<FCapturingTransport>();
+	const auto Client = TestingFloor::FClient::Create(Config, {}, Transport, [&Now] { return Now; });
+	TestEqual(TEXT("Only a live versioned launch initially collects"), Client->IsCollecting(), LaunchLeaseVersion == 1);
+	TestTrue(TEXT("Dormant objects can register"), Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }) != 0);
+	Current.RecordingUUID = TEXT("other-capture");
+	TF_REQUIRE_TRUE(Write(), "Publish mismatched owner");
+	Poll(Client);
+	TestEqual(TEXT("Another capture cannot renew this launch"), Client->IsCollecting(), LaunchLeaseVersion == 1);
+	Current.RecordingUUID = Bootstrap.RecordingUUID;
+	TF_REQUIRE_TRUE(Write(), "Publish active lease");
+	Poll(Client);
+	TestTrue(TEXT("The real file activates a built game"), Client->IsCollecting());
+	Client->Tick(0.0);
+	TestTrue(TEXT("Dormant objects join recording"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_objects"); }));
+	Current.bTelemetryRequested = false;
+	TF_REQUIRE_TRUE(Write(), "Publish an early pause");
+	Poll(Client);
+	TestFalse(TEXT("File pause stops collection"), Client->IsCollecting());
+	IFileManager::Get().Delete(*Path);
+	Poll(Client);
+	TestFalse(TEXT("A still-live static launch cannot override a file pause"), Client->IsCollecting());
+	Current.bTelemetryRequested = true;
+	TF_REQUIRE_TRUE(Write(), "Resume after early file loss");
+	Poll(Client);
+	Now += FTimespan::FromSeconds(6);
+	TF_REQUIRE_TRUE(Write(), "Renew beyond the static launch expiry");
+	Poll(Client);
+	IFileManager::Get().Delete(*Path);
+	Poll(Client);
+	TestTrue(TEXT("An older static launch expiry cannot shorten a renewed file lease"), Client->IsCollecting());
+	Now += FTimespan::FromHours(13);
+	TF_REQUIRE_TRUE(Write(), "Renew beyond launch-time expiry");
+	Poll(Client);
+	TestTrue(TEXT("Fresh matching file is discoverable after launch hint ages out"), Client->IsCollecting());
+	Current.bTelemetryRequested = false;
+	TF_REQUIRE_TRUE(Write(), "Publish paused lease");
+	Poll(Client);
+	TestFalse(TEXT("Pause stops collection"), Client->IsCollecting());
+	Current.bTelemetryRequested = true;
+	TF_REQUIRE_TRUE(Write(), "Publish resumed lease");
+	Poll(Client);
+	TestTrue(TEXT("Renewal resumes collection"), Client->IsCollecting());
+	IFileManager::Get().Delete(*Path);
+	Poll(Client);
+	TestTrue(TEXT("Temporary missing file keeps only the last lease"), Client->IsCollecting());
+	Now += FTimespan::FromSeconds(6);
+	Poll(Client);
+	TestFalse(TEXT("Missing file cannot revive legacy launch metadata"), Client->IsCollecting());
+	TF_REQUIRE_TRUE(Write(), "Restore renewed lease");
+	Poll(Client);
+	TestTrue(TEXT("Fresh lease resumes after missing file"), Client->IsCollecting());
+	FFileHelper::SaveStringToFile(TEXT("1"), *(Directory / TEXT("closed.json")));
+	Poll(Client);
+	Poll(Client);
+	TestFalse(TEXT("Closed capture stops collection"), Client->IsCollecting());
+	Client->Shutdown(0.0);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	}
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTestingFloorInitiallyPausedBuiltLeaseTest, "TestingFloor.Sdk.BuiltGameInitiallyPausedLease", EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::ProductFilter)
+bool FTestingFloorInitiallyPausedBuiltLeaseTest::RunTest(const FString& Parameters)
+{
+	using namespace TestingFloorRecordingTests;
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("TestingFloorTests") / FGuid::NewGuid().ToString();
+	ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*Directory, false, true); };
+	for (const bool bRecordingOnly : { false, true })
+	{
+		FDateTime Now(2026, 1, 1);
+		auto Paused = Lease(TEXT("example-paused"), Directory, Now);
+		Paused.bTelemetryRequested = false;
+		const FString Path = Directory / TEXT("recording-payload.json");
+		TF_REQUIRE_TRUE(FFileHelper::SaveStringToFile(LeaseJson(Paused), *Path), "Publish initially paused capture");
+		auto Bootstrap = Paused;
+		Bootstrap.LeaseVersion = 0;
+		const FString CommandLine = TEXT("--testing-floor=") + LeaseJson(Bootstrap);
+		const FString OriginalCommandLine = FCommandLine::Get();
+		FCommandLine::Set(*CommandLine);
+		ON_SCOPE_EXIT { FCommandLine::Set(*OriginalCommandLine); };
+		FScopedProjectHandoff ProjectPayload;
+		TF_REQUIRE_TRUE(ProjectPayload.Write(TEXT("{}")), "Isolate editor-sidecar precedence");
+		auto Config = Settings();
+		Config.bRecordingOnly = bRecordingOnly;
+		const auto Client = TestingFloor::FClient::Create(Config, {}, MakeShared<FCapturingTransport>(), [&Now] { return Now; });
+		TF_REQUIRE_TRUE(Client->GetRecordingHandoff().IsSet(), "Paused capture is still observed");
+		TestFalse(TEXT("Paused lease is not attached for event tagging"), Client->GetRecordingContext().IsSet());
+		IFileManager::Get().Delete(*Path);
+		Now += FTimespan::FromMilliseconds(250);
+		Client->PollRecordingContext();
+		TF_REQUIRE_TRUE(Client->GetRecordingHandoff().IsSet(), "Last paused lease remains observed until expiry");
+		TestEqual(TEXT("Missing file cannot downgrade an observed unattached lease"), Client->GetRecordingHandoff()->LeaseVersion, 1);
+		TestFalse(TEXT("Missing file cannot attach the legacy hint"), Client->GetRecordingContext().IsSet());
+		Now += FTimespan::FromSeconds(6);
+		Client->PollRecordingContext();
+		TestFalse(TEXT("Expired observed lease cannot suppress QR forever"), Client->GetRecordingHandoff().IsSet());
+		Client->Shutdown(0.0);
 	}
 	return true;
 }

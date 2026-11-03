@@ -309,7 +309,7 @@ For maps using the standard Unreal coordinate frame, choose X/Y projection axes,
 After you register an activity source, the SDK sends debounced movement events.
 Testing Floor draws player paths and position heatmaps from them.
 
-`player_moved` reports `movement.reason` as `start`, `ping`, or `stop`. Movement
+`$tf_player_moved` reports `movement.reason` as `start`, `ping`, or `stop`. Movement
 includes camera position, rotation, FOV and orthographic width activity. Nonzero
 metrics include `movement.distance`, `movement.camera_distance`,
 `movement.rotation_degrees`, `movement.fov_delta`, `movement.ortho_width_delta`,
@@ -334,7 +334,7 @@ Client->EndTeleport(Token);
 
 Use `CancelTeleport(Token)` if the operation is canceled. For an instantaneous
 teleport, call `RecordTeleport(StartCentimeters, EndCentimeters, Reason)` after
-moving. The SDK emits `player_teleported` with endpoints, distance, duration, and
+moving. The SDK emits `$tf_player_teleported` with endpoints, distance, duration, and
 an optional reason, then resets the movement baseline.
 
 ## Recording Sync
@@ -412,3 +412,18 @@ and source packaging.
 ## License
 
 MIT. See [LICENSE.md](LICENSE.md) and [ThirdPartyNotices.md](ThirdPartyNotices.md).
+
+
+### Immutable builds and recording-only collection
+
+Supply the same immutable build ID to the SDK, build upload and map publication. A readable version label may be reused; an artifact identity must change when the built artifact or output coordinate space changes. Collection still defaults to always in built games. Recording-only mode waits for an active recording that requests telemetry; discovery continues while waiting, and pauses or expired leases stop collection. Editor policy still applies.
+
+Set `FSettings.BuildID` and `bRecordingOnly` before creating the client. The optional `CoordinateTransform` has `bEnabled`, signed `Axes`, positive `Scale`, and `Offset` fields. For example, axes `(2,-1,3)`, scale `0.01`, offset `(10,20,30)` convert native centimeters `(x,y,z)` to `(y/100+10,-x/100+20,z/100+30)` in meters.
+
+Unconfigured output preserves the existing contract: points are centimeters and movement/teleport length metrics are meters. When conversion is enabled, those legacy meter metrics pass back through native centimeters before the configured scale, so points, objects, camera width and scalar lengths share one output unit. Movement thresholds retain their documented meter units.
+
+Axes must be a signed permutation of 1–3; scale must be positive and finite; offsets must be finite. Invalid configuration disables collection. Configuration is captured when the client starts. Object positions quantize in native units before conversion, and movement thresholds run before conversion. Directions only permute/sign axes; converted events omit native Euler fields and retain forward/up vectors. Arbitrary properties are not guessed, and the event processor runs after conversion. Map bounds, axes and units must describe the configured output space.
+
+Automatic movement and teleport events now use `$tf_player_moved` and `$tf_player_teleported`. Update filters that used their previous automatic names. Games may still send their own `player_moved` and `player_teleported`; the public tracking API rejects reserved `$tf_` names.
+
+Built games use the launch argument's telemetry directory to read the desktop app's renewable `recording-payload.json`. The file must name the same recording UUID. After observing a renewable lease, a missing or unreadable file retains that lease only until expiry; it cannot revive the static launch hint. Paused leases keep renewing with `telemetry_requested:false`. Recording-only mode requires a desktop app version that publishes this file; older desktop apps cannot activate that mode in built games.
