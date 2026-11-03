@@ -64,6 +64,10 @@ struct TESTINGFLOORSDK_API FRecordingContext
 	 * EditorProcessID, a handoff whose `editor_pid` names another editor is ignored, from either source.
 	 */
 	static TOptional<FRecordingContext> Resolve(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now, int64 EditorProcessID = 0);
+private:
+	friend class FClient;
+	static TOptional<FRecordingContext> DiscoverWithPrevious(FDateTime Now, const TOptional<FRecordingContext>& Previous);
+	static TOptional<FRecordingContext> ResolveWithPrevious(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now, int64 EditorProcessID, const TOptional<FRecordingContext>& Previous);
 };
 
 /** Optional uniform output space. Native movement thresholds stay in their documented units. */

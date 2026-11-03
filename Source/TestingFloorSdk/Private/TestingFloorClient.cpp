@@ -400,6 +400,11 @@ bool FRecordingContext::HasActiveLease(FDateTime Now) const
 
 TOptional<FRecordingContext> FRecordingContext::Discover(FDateTime Now)
 {
+	return DiscoverWithPrevious(Now, {});
+}
+
+TOptional<FRecordingContext> FRecordingContext::DiscoverWithPrevious(FDateTime Now, const TOptional<FRecordingContext>& Previous)
+{
 	// Interactive editors compare editor_pid; standalone child Play is project-scoped.
 	static const int64 CurrentProcessID = FPlatformProcess::GetCurrentProcessId();
 	FString Sidecar;
@@ -408,7 +413,7 @@ TOptional<FRecordingContext> FRecordingContext::Discover(FDateTime Now)
 	{
 		Payloads.Add(MoveTemp(Sidecar));
 	}
-	return Resolve(FCommandLine::Get(), Payloads, Now, GIsEditor ? CurrentProcessID : 0);
+	return ResolveWithPrevious(FCommandLine::Get(), Payloads, Now, GIsEditor ? CurrentProcessID : 0, Previous);
 }
 
 TOptional<FRecordingContext> Private::ParseRecordingPayload(const FString& Json, FDateTime Now, bool bAllowStale)
@@ -520,6 +525,11 @@ TOptional<FRecordingContext> Private::RecordingFromCommandLine(const FString& Co
 
 TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now, int64 EditorProcessID)
 {
+	return ResolveWithPrevious(CommandLine, SidecarPayloads, Now, EditorProcessID, {});
+}
+
+TOptional<FRecordingContext> FRecordingContext::ResolveWithPrevious(const FString& CommandLine, TConstArrayView<FString> SidecarPayloads, FDateTime Now, int64 EditorProcessID, const TOptional<FRecordingContext>& Previous)
+{
 	// A handoff that names another editor belongs to that editor, whichever source carries it, and
 	// cannot hide this editor's own handoff.
 	const auto ForThisEditor = [EditorProcessID](const TOptional<FRecordingContext>& Recording) {
@@ -547,6 +557,8 @@ TOptional<FRecordingContext> FRecordingContext::Resolve(const FString& CommandLi
 	if (const auto Locator = Private::RecordingFromCommandLine(CommandLine, Now, true); ForThisEditor(Locator))
 	{
 		if (const auto Lease = WithRenewableLease(Locator.GetValue()); Lease.IsSet()) return Lease;
+		if (Previous.IsSet() && Previous->LeaseVersion != 0 && Previous->RecordingUUID == Locator->RecordingUUID
+			&& Previous->TelemetryDirectory == Locator->TelemetryDirectory) return Previous;
 	}
 	if (const auto Recording = FromCommandLine(CommandLine, Now); ForThisEditor(Recording))
 	{
@@ -945,7 +957,10 @@ FClient::FClient(FSettings InSettings, FEnvironment InEnvironment, TSharedRef<IT
 	SessionID = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
 	if (!RecordingSource && !Environment.bAutomation)
 	{
-		RecordingSource = [](FDateTime Now) { return FRecordingContext::Discover(Now); };
+		RecordingSource = [this](FDateTime Now) {
+			const auto& Previous = Settings.Recording.IsSet() && Settings.Recording->LeaseVersion != 0 ? Settings.Recording : DiscoveredRecording;
+			return FRecordingContext::DiscoverWithPrevious(Now, Previous);
+		};
 	}
 	TOptional<FRecordingContext> Initial = Settings.Recording;
 	if (!Initial.IsSet() && RecordingSource) Initial = RecordingSource(Clock());

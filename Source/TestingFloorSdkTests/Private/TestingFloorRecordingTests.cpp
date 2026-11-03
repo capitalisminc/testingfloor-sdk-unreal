@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/CommandLine.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformProcess.h"
@@ -1009,12 +1010,17 @@ bool FTestingFloorBuiltRecordingOnlyTest::RunTest(const FString& Parameters)
 	auto Bootstrap = Current;
 	Bootstrap.LeaseVersion = LaunchLeaseVersion;
 	const FString CommandLine = TEXT("--testing-floor=") + LeaseJson(Bootstrap).LeftChop(1) + FString::Printf(TEXT(",\"created_at_unix_ms\":%lld}"), Now.ToUnixTimestamp() * 1000);
+	const FString OriginalCommandLine = FCommandLine::Get();
+	FCommandLine::Set(*CommandLine);
+	ON_SCOPE_EXIT { FCommandLine::Set(*OriginalCommandLine); };
+	FScopedProjectHandoff ProjectPayload;
+	TF_REQUIRE_TRUE(ProjectPayload.Write(TEXT("{}")), "Isolate editor-sidecar precedence");
 	const auto Write = [&] { Current.LeaseExpiresAtUnixMilliseconds = Now.ToUnixTimestamp() * 1000 + Now.GetMillisecond() + 5000; return FFileHelper::SaveStringToFile(LeaseJson(Current), *Path); };
 	const auto Poll = [&Now](const TSharedPtr<TestingFloor::FClient>& Client) { Now += FTimespan::FromMilliseconds(250); Client->PollRecordingContext(); };
 	auto Config = Settings();
 	Config.bRecordingOnly = true;
 	const auto Transport = MakeShared<FCapturingTransport>();
-	const auto Client = TestingFloor::FClient::Create(Config, {}, Transport, [&Now] { return Now; }, [&CommandLine](FDateTime At) { return TestingFloor::FRecordingContext::Resolve(CommandLine, {}, At); });
+	const auto Client = TestingFloor::FClient::Create(Config, {}, Transport, [&Now] { return Now; });
 	TestEqual(TEXT("Only a live versioned launch initially collects"), Client->IsCollecting(), LaunchLeaseVersion == 1);
 	TestTrue(TEXT("Dormant objects can register"), Client->TrackObject(TEXT("crate"), [] { return TOptional<FVector>(FVector::ZeroVector); }) != 0);
 	Current.RecordingUUID = TEXT("other-capture");
@@ -1027,6 +1033,22 @@ bool FTestingFloorBuiltRecordingOnlyTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("The real file activates a built game"), Client->IsCollecting());
 	Client->Tick(0.0);
 	TestTrue(TEXT("Dormant objects join recording"), Client->GetQueuedEvents().ContainsByPredicate([](const TestingFloor::FEvent& Event) { return Event.Name == TEXT("$tf_objects"); }));
+	Current.bTelemetryRequested = false;
+	TF_REQUIRE_TRUE(Write(), "Publish an early pause");
+	Poll(Client);
+	TestFalse(TEXT("File pause stops collection"), Client->IsCollecting());
+	IFileManager::Get().Delete(*Path);
+	Poll(Client);
+	TestFalse(TEXT("A still-live static launch cannot override a file pause"), Client->IsCollecting());
+	Current.bTelemetryRequested = true;
+	TF_REQUIRE_TRUE(Write(), "Resume after early file loss");
+	Poll(Client);
+	Now += FTimespan::FromSeconds(6);
+	TF_REQUIRE_TRUE(Write(), "Renew beyond the static launch expiry");
+	Poll(Client);
+	IFileManager::Get().Delete(*Path);
+	Poll(Client);
+	TestTrue(TEXT("An older static launch expiry cannot shorten a renewed file lease"), Client->IsCollecting());
 	Now += FTimespan::FromHours(13);
 	TF_REQUIRE_TRUE(Write(), "Renew beyond launch-time expiry");
 	Poll(Client);
@@ -1075,9 +1097,14 @@ bool FTestingFloorInitiallyPausedBuiltLeaseTest::RunTest(const FString& Paramete
 		auto Bootstrap = Paused;
 		Bootstrap.LeaseVersion = 0;
 		const FString CommandLine = TEXT("--testing-floor=") + LeaseJson(Bootstrap);
+		const FString OriginalCommandLine = FCommandLine::Get();
+		FCommandLine::Set(*CommandLine);
+		ON_SCOPE_EXIT { FCommandLine::Set(*OriginalCommandLine); };
+		FScopedProjectHandoff ProjectPayload;
+		TF_REQUIRE_TRUE(ProjectPayload.Write(TEXT("{}")), "Isolate editor-sidecar precedence");
 		auto Config = Settings();
 		Config.bRecordingOnly = bRecordingOnly;
-		const auto Client = TestingFloor::FClient::Create(Config, {}, MakeShared<FCapturingTransport>(), [&Now] { return Now; }, [&CommandLine](FDateTime At) { return TestingFloor::FRecordingContext::Resolve(CommandLine, {}, At); });
+		const auto Client = TestingFloor::FClient::Create(Config, {}, MakeShared<FCapturingTransport>(), [&Now] { return Now; });
 		TF_REQUIRE_TRUE(Client->GetRecordingHandoff().IsSet(), "Paused capture is still observed");
 		TestFalse(TEXT("Paused lease is not attached for event tagging"), Client->GetRecordingContext().IsSet());
 		IFileManager::Get().Delete(*Path);
